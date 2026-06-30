@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgis/postgis:17-3.5
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: earthquake
+      POSTGRES_PASSWORD: earthquake
+      POSTGRES_DB: earthquake
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U earthquake -d earthquake"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: .
+    command: ["api"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "/earthquake-service", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  worker:
+    build: .
+    command: ["worker"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  postgres-data:

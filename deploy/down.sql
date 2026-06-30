@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS notification_deliveries;
+DROP TABLE IF EXISTS notification_subscriptions;
+DROP TABLE IF EXISTS provider_state;
+DROP TABLE IF EXISTS ingestion_runs;
+DROP TABLE IF EXISTS earthquake_revisions;
+DROP TABLE IF EXISTS earthquake_source_records;
+DROP TABLE IF EXISTS earthquakes;
+DROP FUNCTION IF EXISTS publish_notification_delivery_change();
+DROP FUNCTION IF EXISTS publish_earthquake_change();

@@ -1,0 +1,7 @@
+.git
+.idea
+.env
+earthquake-service
+coverage.out
+web/node_modules
+docs

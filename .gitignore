@@ -1,0 +1,9 @@
+.env
+earthquake-service
+coverage.out
+.idea/
+web/node_modules/
+# Frontend build output is embedded by Go; keep only the placeholder so the
+# package compiles before the first build.
+internal/httpapi/web/dist/*
+!internal/httpapi/web/dist/.gitkeep

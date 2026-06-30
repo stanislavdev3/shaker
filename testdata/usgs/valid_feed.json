@@ -1,0 +1,39 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {"generated": 1782727200000, "count": 2},
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "mag": 5.4,
+        "place": "120 km south of Example",
+        "time": 1782727091000,
+        "updated": 1782727160000,
+        "url": "https://earthquake.usgs.gov/earthquakes/eventpage/test1",
+        "detail": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=test1",
+        "felt": null,
+        "cdi": null,
+        "mmi": 4.1,
+        "alert": null,
+        "status": "reviewed",
+        "tsunami": 0,
+        "sig": 449,
+        "nst": 42,
+        "dmin": 0.12,
+        "rms": 0.8,
+        "gap": 31,
+        "magType": "mww",
+        "type": "earthquake",
+        "title": "M 5.4 - Example"
+      },
+      "geometry": {"type": "Point", "coordinates": [74.2, 40.1, 18.3]},
+      "id": "test1"
+    },
+    {
+      "type": "Feature",
+      "properties": {"mag": 2.1, "time": null, "updated": 1782727160000, "tsunami": 0},
+      "geometry": {"type": "Point", "coordinates": [10, 20, 5]},
+      "id": "malformed"
+    }
+  ]
+}

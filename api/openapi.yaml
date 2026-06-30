@@ -1,0 +1,226 @@
+openapi: 3.1.0
+info:
+  title: Earthquake Service API
+  version: 1.0.0
+  description: Reports earthquakes after external providers publish them. It is not an early-warning system.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+security: []
+servers:
+  - url: https://{host}
+    variables:
+      host:
+        default: api.earthquake-service.invalid
+        description: Deployment-specific API host
+paths:
+  /:
+    get:
+      summary: Open the earthquake monitoring frontend
+      operationId: getFrontend
+      responses:
+        "200":
+          description: Embedded HTML application
+          content:
+            text/html:
+              schema: {type: string}
+        "404": {$ref: "#/components/responses/Problem"}
+  /health/live:
+    get:
+      summary: Check liveness
+      operationId: live
+      responses:
+        "200": {description: Process is alive}
+        "400": {$ref: "#/components/responses/Problem"}
+  /health/ready:
+    get:
+      summary: Check readiness
+      operationId: ready
+      responses:
+        "200": {description: Service is ready}
+        "400": {$ref: "#/components/responses/Problem"}
+        "503": {$ref: "#/components/responses/Problem"}
+  /v1/earthquakes:
+    get:
+      summary: List earthquakes
+      operationId: listEarthquakes
+      parameters:
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+        - {name: min_magnitude, in: query, schema: {type: number}}
+        - {name: max_magnitude, in: query, schema: {type: number}}
+        - {name: min_depth_km, in: query, schema: {type: number}}
+        - {name: max_depth_km, in: query, schema: {type: number}}
+        - {name: latitude, in: query, schema: {type: number, minimum: -90, maximum: 90}}
+        - {name: longitude, in: query, schema: {type: number, minimum: -180, maximum: 180}}
+        - {name: radius_km, in: query, schema: {type: number, exclusiveMinimum: 0}}
+        - {name: bbox, in: query, schema: {type: string}}
+        - {name: tsunami, in: query, schema: {type: boolean}}
+        - {name: alert_level, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string}}
+        - {name: event_type, in: query, schema: {type: string}}
+        - {name: source, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 50, minimum: 1, maximum: 200}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: sort, in: query, schema: {type: string, enum: [occurred_at_desc, occurred_at_asc, magnitude_desc]}}
+        - {name: format, in: query, schema: {type: string, enum: [json, geojson]}}
+      responses:
+        "200":
+          description: Earthquake page or GeoJSON FeatureCollection
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EarthquakePage"}
+            application/geo+json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Problem"}
+  /v1/earthquakes/{earthquake_id}:
+    get:
+      summary: Get earthquake details
+      operationId: getEarthquake
+      parameters:
+        - {$ref: "#/components/parameters/EarthquakeID"}
+      responses:
+        "200":
+          description: Earthquake details
+          content: {application/json: {schema: {type: object, properties: {data: {$ref: "#/components/schemas/Earthquake"}}}}}
+        "404": {$ref: "#/components/responses/Problem"}
+  /v1/stream:
+    get:
+      summary: Open the realtime earthquake WebSocket stream
+      operationId: streamEarthquakes
+      description: Upgrades to WebSocket. Messages have type `connected`, `earthquake_changed`, or `notification_changed`.
+      responses:
+        "101": {description: WebSocket connection established}
+        "400": {$ref: "#/components/responses/Problem"}
+  /v1/admin/earthquakes/{earthquake_id}/revisions:
+    get:
+      summary: List earthquake revisions
+      operationId: listEarthquakeRevisions
+      security: [{adminKey: []}]
+      parameters:
+        - {$ref: "#/components/parameters/EarthquakeID"}
+        - {name: include_raw, in: query, schema: {type: boolean, default: false}}
+      responses:
+        "200": {description: Revision list}
+        "401": {$ref: "#/components/responses/Problem"}
+  /v1/admin/notification-subscriptions:
+    get:
+      summary: List notification subscriptions
+      operationId: listNotificationSubscriptions
+      security: [{adminKey: []}]
+      responses: {"200": {description: Subscriptions}, "401": {$ref: "#/components/responses/Problem"}}
+    post:
+      summary: Create a notification subscription
+      operationId: createNotificationSubscription
+      security: [{adminKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/SubscriptionWrite"}}}
+      responses:
+        "201": {description: Created; generated webhook_secret is returned once}
+        "400": {$ref: "#/components/responses/Problem"}
+  /v1/admin/notification-subscriptions/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      summary: Get a notification subscription
+      operationId: getNotificationSubscription
+      security: [{adminKey: []}]
+      responses: {"200": {description: Subscription}, "404": {$ref: "#/components/responses/Problem"}}
+    patch:
+      summary: Update a notification subscription
+      operationId: updateNotificationSubscription
+      security: [{adminKey: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/SubscriptionWrite"}}}}
+      responses: {"200": {description: Updated}, "400": {$ref: "#/components/responses/Problem"}}
+    delete:
+      summary: Disable a notification subscription
+      operationId: disableNotificationSubscription
+      security: [{adminKey: []}]
+      responses: {"204": {description: Disabled}, "404": {$ref: "#/components/responses/Problem"}}
+  /v1/admin/notification-deliveries:
+    get:
+      summary: List notification deliveries
+      operationId: listNotificationDeliveries
+      security: [{adminKey: []}]
+      responses: {"200": {description: Most recent deliveries}, "401": {$ref: "#/components/responses/Problem"}}
+  /v1/admin/notification-deliveries/{id}:
+    get:
+      summary: Get a notification delivery
+      operationId: getNotificationDelivery
+      security: [{adminKey: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {"200": {description: Delivery}, "404": {$ref: "#/components/responses/Problem"}}
+  /v1/admin/notification-deliveries/{id}/retry:
+    post:
+      summary: Retry a notification delivery
+      operationId: retryNotificationDelivery
+      security: [{adminKey: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {"202": {description: Retry scheduled}, "409": {$ref: "#/components/responses/Problem"}}
+components:
+  securitySchemes:
+    adminKey: {type: http, scheme: bearer}
+  parameters:
+    EarthquakeID: {name: earthquake_id, in: path, required: true, schema: {type: string, format: uuid}}
+  responses:
+    Problem:
+      description: RFC 9457 Problem Details
+      content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, detail, instance, request_id]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        request_id: {type: string}
+    Earthquake:
+      type: object
+      required: [id, occurred_at, latitude, longitude, source, version]
+      properties:
+        id: {type: string, format: uuid}
+        occurred_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        latitude: {type: number}
+        longitude: {type: number}
+        depth_km: {type: [number, "null"]}
+        magnitude: {type: [number, "null"]}
+        magnitude_type: {type: [string, "null"]}
+        place: {type: [string, "null"]}
+        status: {type: [string, "null"]}
+        event_type: {type: [string, "null"]}
+        alert_level: {type: [string, "null"]}
+        tsunami: {type: [boolean, "null"]}
+        significance: {type: [integer, "null"]}
+        source: {type: string}
+        version: {type: integer}
+        distance_km: {type: [number, "null"]}
+    EarthquakePage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: {type: array, items: {$ref: "#/components/schemas/Earthquake"}}
+        pagination:
+          type: object
+          properties: {next_cursor: {type: [string, "null"]}}
+    SubscriptionWrite:
+      type: object
+      properties:
+        name: {type: string}
+        webhook_url: {type: string, format: uri}
+        webhook_secret: {type: string, writeOnly: true}
+        minimum_magnitude: {type: [number, "null"]}
+        maximum_magnitude: {type: [number, "null"]}
+        center_latitude: {type: [number, "null"]}
+        center_longitude: {type: [number, "null"]}
+        radius_km: {type: [number, "null"]}
+        tsunami_only: {type: boolean}
+        notify_on_new: {type: boolean}
+        notify_on_threshold_crossing: {type: boolean}
+        notify_on_tsunami_change: {type: boolean}
+        notify_on_alert_increase: {type: boolean}
+        maximum_event_age: {type: string, example: 2h}
