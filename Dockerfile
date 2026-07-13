@@ -11,8 +11,9 @@ WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-# Embed the freshly built SPA (overwrites the .gitkeep placeholder).
+# Embed the freshly built SPA (overwrites the placeholder directory).
 COPY --from=frontend /internal/httpapi/web/dist ./internal/httpapi/web/dist
+RUN go test ./...
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/earthquake-service ./cmd/earthquake-service
 
 FROM gcr.io/distroless/static-debian12:nonroot

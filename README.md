@@ -27,6 +27,27 @@ The frontend is a Vite app whose production build is embedded into the Go binary
 
 If the schema changed while retaining a local volume, use `docker compose down -v` only when discarding local data is acceptable.
 
+## Production image and deployment
+
+The application repository owns the production Dockerfile and produces a
+self-contained image with the compiled React UI and Go service:
+
+```bash
+make image
+```
+
+The default image name is `shaker:latest`; override it with `IMAGE=...` when
+publishing to a registry. The home-server deployment compose consumes this
+prebuilt image and contains no application build context:
+
+```bash
+make deploy
+make deploy IMAGE=registry.example/shaker:release-tag
+```
+
+`make deploy` builds the image here first, then runs the server compose without
+`--build`.
+
 ## Commands and execution roles
 
 ```bash
