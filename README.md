@@ -1,6 +1,9 @@
 # Earthquake Backend Service
 
-This service collects earthquake reports from USGS, normalizes them in PostgreSQL/PostGIS, exposes public JSON and GeoJSON APIs, and delivers Telegram and signed webhook notifications. It reports events after USGS publishes them; it is not an earthquake early-warning system.
+This service collects low-latency and catalogue earthquake observations from EMSC and
+USGS, normalizes and correlates them in PostgreSQL/PostGIS, exposes public JSON and
+GeoJSON APIs, and delivers Telegram and signed webhook notifications. It is an
+earthquake notification service, not a seismic early-warning network.
 
 The deployment is a modular monolith with separate `api` and `worker` process roles. PostgreSQL is the source of truth, revision audit store, persistent provider checkpoint store, and transactional notification queue. No external broker or cache is required.
 
@@ -76,7 +79,9 @@ confirmation edits the original Telegram message. See
 [`docs/emsc.md`](docs/emsc.md) for rollout controls and the current
 cross-provider correlation boundary.
 
-Set `TELEGRAM_BOT_TOKEN` to enable the Telegram bot in the worker. Users send `/start`, share their location, and enter a minimum magnitude to receive alerts within a fixed 1,000 km radius. See [docs/telegram.md](docs/telegram.md).
+Set `TELEGRAM_BOT_TOKEN` to enable the Telegram bot in the worker. Users send `/start`,
+share their location, choose RU or EN, and select an expected local MMI threshold from
+II through VI. See [docs/telegram.md](docs/telegram.md).
 
 Set `TELEGRAM_GLOBAL_CHANNEL=@eqmonitor` to publish all normalized earthquake incidents
 worldwide to a channel where the bot has post and edit administrator permissions.
@@ -84,22 +89,33 @@ worldwide to a channel where the bot has post and edit administrator permissions
 ## API examples
 
 ```bash
-curl 'http://localhost:8080/v1/earthquakes?min_magnitude=5&limit=50'
-curl 'http://localhost:8080/v1/earthquakes?latitude=40.1&longitude=74.2&radius_km=250'
-curl -H 'Accept: application/geo+json' 'http://localhost:8080/v1/earthquakes'
-curl 'http://localhost:8080/v1/earthquakes/00000000-0000-0000-0000-000000000000'
+curl 'http://localhost:8080/api/earthquakes?min_magnitude=5&limit=50'
+curl 'http://localhost:8080/api/earthquakes?latitude=40.1&longitude=74.2&radius_km=250'
+curl -H 'Accept: application/geo+json' 'http://localhost:8080/api/earthquakes'
+curl 'http://localhost:8080/api/earthquakes/00000000-0000-0000-0000-000000000000'
 ```
+
+Public and mobile clients use the unversioned `/api` namespace. Administrative JSON
+automation remains under the Cloudflare Access-protected `/admin/api` namespace.
 
 Administrative requests use `Authorization: Bearer <ADMIN_API_KEY>`. Create a subscription:
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/notification-subscriptions \
+curl -X POST http://localhost:8080/admin/api/notification-subscriptions \
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"name":"operations","webhook_url":"https://receiver.example/webhooks/earthquakes","minimum_magnitude":5,"notify_on_new":true}'
 ```
 
 If the server generates the webhook secret it returns it once. Later reads never return it.
+
+A private, server-rendered administration interface is available on `/admin` for the
+API role when `ADMIN_ENABLED=true`. It verifies Cloudflare Access at the origin, then
+applies database-backed viewer/operator/owner roles. Configure a dedicated
+`ADMIN_HOST`, the Access team domain and audience, and at least one bootstrap owner.
+Its scope, security model, screens, deployment, and remaining implementation sequence
+are specified in [docs/admin.md](docs/admin.md). Metrics and logs remain exclusively
+in Grafana and Loki.
 
 ## Webhook verification
 
@@ -136,9 +152,9 @@ Generated OpenAPI server code is not committed: the current handlers are deliber
 
 ## Known limitations
 
-- USGS is currently the only implemented provider. The production architecture adds
-  EMSC WebSocket and FDSN ingestion plus audited cross-provider incident correlation;
-  see `docs/event-correlation.md`.
+- EMSC and USGS observations are associated conservatively; ambiguous cross-provider
+  candidates remain separate until stronger evidence or a future manual admin action
+  is available. See `docs/event-correlation.md`.
 - Notifications support Telegram and webhooks; email, FCM, and APNs are extension points, not implementations.
 - Delivery is at least once. Receivers must deduplicate delivery IDs.
 - Subscription PATCH treats omitted properties as unchanged; explicit JSON `null` cannot currently clear nullable filters.

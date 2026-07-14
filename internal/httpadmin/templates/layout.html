@@ -1,0 +1,90 @@
+{{define "layout"}}<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#090d14">
+  <title>{{.Title}} · Shaker Admin</title>
+  <link rel="stylesheet" href="/admin/assets/tabler.min.css">
+  <link rel="stylesheet" href="/admin/assets/style.css">
+</head>
+<body class="layout-fluid">
+  <aside class="navbar navbar-vertical navbar-expand-lg sidebar">
+    <a class="brand" href="/admin/incidents" aria-label="Shaker Admin home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M5 17h5l2.2-7 4.1 14 3-10 2 3H27"/></svg>
+      </span>
+      <span><strong>Shaker</strong><small>Operations console</small></span>
+    </a>
+    <div class="environment"><span></span> Production</div>
+    <nav aria-label="Administration">
+      <p class="nav-label">Workspace</p>
+      <a class="nav-item {{if eq .Section "incidents"}}active{{end}}" href="/admin/incidents">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M3 12h3m12 0h3M12 3v3m0 12v3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/></svg>
+        <span>Incidents</span>
+      </a>
+      <a class="nav-item {{if eq .Section "subscriptions"}}active{{end}}" href="/admin/subscriptions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+        <span>Subscriptions</span>
+      </a>
+      <a class="nav-item {{if eq .Section "notifications"}}active{{end}}" href="/admin/notifications">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+        <span>Notifications</span>
+      </a>
+      {{if eq .Identity.Role "owner"}}
+      <p class="nav-label">Governance</p>
+      <a class="nav-item {{if eq .Section "audit"}}active{{end}}" href="/admin/audit">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span>Audit log</span>
+      </a>
+      {{end}}
+    </nav>
+    <footer class="sidebar-footer">
+      <div class="account">
+        <span class="avatar">{{slice .Identity.Email 0 1}}</span>
+        <span class="account-copy"><strong>{{.Identity.Email}}</strong><small>{{.Identity.Role}} access</small></span>
+        <span class="secure-dot" title="Authenticated through Cloudflare Access"></span>
+      </div>
+    </footer>
+  </aside>
+  <main class="page-wrapper">
+    <header class="mobile-header">
+      <a class="brand compact" href="/admin/incidents"><span class="brand-mark">S</span><strong>Shaker</strong></a>
+      <span class="environment"><span></span> Production</span>
+    </header>
+    <nav class="mobile-nav" aria-label="Mobile administration">
+      <a class="mobile-nav-item {{if eq .Section "incidents"}}active{{end}}" href="/admin/incidents">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M3 12h3m12 0h3M12 3v3m0 12v3"/></svg>
+        <span>Incidents</span>
+      </a>
+      <a class="mobile-nav-item {{if eq .Section "subscriptions"}}active{{end}}" href="/admin/subscriptions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+        <span>Subs</span>
+      </a>
+      <a class="mobile-nav-item {{if eq .Section "notifications"}}active{{end}}" href="/admin/notifications">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+        <span>Alerts</span>
+      </a>
+      {{if eq .Identity.Role "owner"}}
+      <a class="mobile-nav-item {{if eq .Section "audit"}}active{{end}}" href="/admin/audit">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span>Audit</span>
+      </a>
+      {{end}}
+    </nav>
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">{{if .ContextID}}Record · <span class="mono">{{.ContextID}}</span>{{else}}Shaker / {{.Section}}{{end}}</div>
+        <h1>{{.Title}}</h1>
+        <p>{{.Description}}</p>
+      </div>
+      {{if .GrafanaURL}}<a class="button secondary btn btn-ghost-secondary" href="{{.GrafanaURL}}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m5 14v-7m5 7V3"/></svg>
+        Open in Grafana
+      </a>{{end}}
+    </div>
+    {{template "content" .}}
+    <footer class="page-footer">Shaker operations console <span>·</span> Read-only mode</footer>
+  </main>
+</body>
+</html>{{end}}

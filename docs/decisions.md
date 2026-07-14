@@ -31,6 +31,19 @@ automatically associated. See [event-correlation.md](event-correlation.md).
 
 Delivery creation must be atomic with earthquake changes. PostgreSQL provides this atomicity, uniqueness constraints, durable storage, `FOR UPDATE SKIP LOCKED`, and abandoned-lock recovery without another operational dependency.
 
+## Administration is embedded and management-only
+
+The private administration interface is server-rendered by the API role of the Go
+modular monolith. It uses embedded HTMX, CSS, and MapLibre assets and introduces no
+separate frontend service or Node.js runtime. Cloudflare Access protects a dedicated
+hostname, and the origin independently validates the Access application JWT.
+
+The interface manages and investigates individual incidents, provider observations,
+subscriptions, deliveries, correlation decisions, and administrative audit records.
+It does not render health, counters, rates, queue aggregates, time-series charts,
+ingestion summaries, or logs. Grafana and Loki remain the only observability UI; admin
+pages provide contextual deep links. See [admin.md](admin.md).
+
 ## Personal alerts use local shaking intensity
 
 New personal Telegram subscriptions use expected Modified Mercalli Intensity at the
@@ -71,6 +84,8 @@ Normalized columns support stable application queries while source records retai
 - Public searches are bounded to 200 rows per page. No fixed time-range limit is imposed because cursor queries use indexed deterministic order.
 - The supplied PostGIS database has permission to install `postgis` and `pgcrypto`.
 - Compose applies the initial migration only when creating a new database volume; Atlas is the migration mechanism for existing environments.
-- Administrative authentication is a single deployment-level bearer key because user accounts and OAuth are explicit non-goals.
+- The administrative JSON API retains its deployment-level bearer key for automation.
+  The browser administration interface uses Cloudflare Access identities, application
+  JWT validation, role bindings, CSRF protection, and an append-only action audit.
 - Realtime client updates use PostgreSQL `LISTEN/NOTIFY` because notifications are emitted after transaction commit and require no additional broker. The WebSocket stream is best effort; the HTTP API remains authoritative.
 - Public notification WebSocket messages are deliberately content-free resynchronization hints. Protected delivery records are fetched separately with the administrative API key.

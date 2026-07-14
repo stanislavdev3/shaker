@@ -1,0 +1,15 @@
+{{define "content"}}
+<p class="notice">Audit history is append-only. Read-only browsing does not create additional entries.</p>
+<div class="card table-wrap">
+  <div class="table-meta"><span><strong>{{len .Audit}}</strong> audit entries on this page</span><span>Newest first</span></div>
+  <table class="table table-vcenter"><thead><tr><th>Event</th><th>Actor</th><th>Role</th><th>Action</th><th>Resource</th><th>Reason</th><th>Request</th></tr></thead><tbody>
+  {{range .Audit}}<tr>
+    <td>{{time .CreatedAt}}</td><td><span class="primary">{{.ActorEmail}}</span><span class="secondary-text mono">{{.ActorSubject}}</span></td>
+    <td><span class="status status-{{statusClass .Role}}">{{.Role}}</span></td><td>{{.Action}}</td>
+    <td><span class="primary">{{.ResourceType}}</span><span class="secondary-text mono">{{.ResourceID}}</span></td>
+    <td>{{text .Reason}}</td><td class="mono">{{text .RequestID}}</td>
+  </tr>{{else}}<tr><td colspan="7" class="empty">No administrative actions have been recorded.</td></tr>{{end}}
+  </tbody></table>
+</div>
+{{if .NextCursor}}<a class="button secondary btn btn-ghost-secondary" href="?cursor={{urlquery .NextCursor}}">Load older entries</a>{{end}}
+{{end}}

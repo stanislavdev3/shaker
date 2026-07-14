@@ -34,6 +34,46 @@ func TestLoadRejectsInvalidEMSCWebSocketURL(t *testing.T) {
 	}
 }
 
+func TestLoadAdministrationConfiguration(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("ADMIN_ENABLED", "true")
+	t.Setenv("ADMIN_HOST", "admin.example.com")
+	t.Setenv("ADMIN_DEVELOPMENT_EMAIL", "admin@example.com")
+	t.Setenv("ADMIN_BOOTSTRAP_OWNERS", " admin@example.com, operator@example.com ")
+
+	configuration, err := Load("api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configuration.AdminEnabled || len(configuration.AdminBootstrapOwners) != 2 {
+		t.Fatalf("unexpected administration configuration: %#v", configuration)
+	}
+}
+
+func TestLoadRequiresCloudflareAccessOutsideDevelopment(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("ADMIN_ENABLED", "true")
+	t.Setenv("ADMIN_HOST", "admin.example.com")
+	t.Setenv("ADMIN_BOOTSTRAP_OWNERS", "admin@example.com")
+	if _, err := Load("api"); err == nil {
+		t.Fatal("expected missing Cloudflare Access configuration error")
+	}
+}
+
+func TestLoadRejectsNonCloudflareAdministrationIssuer(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("ADMIN_ENABLED", "true")
+	t.Setenv("ADMIN_HOST", "admin.example.com")
+	t.Setenv("ADMIN_BOOTSTRAP_OWNERS", "admin@example.com")
+	t.Setenv("CLOUDFLARE_ACCESS_TEAM_DOMAIN", "http://127.0.0.1:8080")
+	t.Setenv("CLOUDFLARE_ACCESS_AUDIENCE", "audience")
+	if _, err := Load("api"); err == nil {
+		t.Fatal("expected invalid Cloudflare Access team domain error")
+	}
+}
+
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("APP_ENV", "development")

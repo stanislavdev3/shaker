@@ -11,8 +11,11 @@ flowchart LR
     Ingestion --> Correlation[Incident correlation]
     Correlation --> DB[(PostgreSQL and PostGIS)]
     Client[Mobile and public API clients] --> API[HTTP API]
-    Admin[Administrator] --> API
-    API --> DB
+    Admin[Administrator] --> Access[Cloudflare Access]
+    Access --> AdminUI[Private admin HTTP adapter]
+    API --> Application[Application services]
+    AdminUI --> Application
+    Application --> DB
     DB -- LISTEN / NOTIFY --> API
     DB --> Worker[Notification worker]
     Worker --> Webhook[Subscriber webhook]
@@ -21,7 +24,17 @@ flowchart LR
 
 The executable is one modular monolith with `api`, `worker`, `all`, and `backfill` commands. Domain packages contain normalized models and trigger rules. Provider, HTTP, and PostgreSQL packages are adapters and dependencies point inward.
 
-The service exposes JSON, GeoJSON, and WebSocket APIs for mobile and other API clients; it does not serve a web frontend. PostgreSQL triggers publish compact change references after commit. A dedicated API connection listens for those references, reloads normalized earthquake data, and broadcasts it through a bounded WebSocket hub. Notification changes emit only a content-free public resynchronization hint; administrative details remain available exclusively through the authenticated API.
+The service exposes JSON, GeoJSON, and WebSocket APIs for mobile and other API clients;
+it does not serve a public web frontend. A private server-rendered administration
+interface is planned under `/admin` in the API role and is protected by Cloudflare
+Access plus origin JWT verification. It is a management plane, not an observability
+dashboard; metrics and logs remain in Grafana and Loki. See [admin.md](admin.md).
+
+PostgreSQL triggers publish compact change references after commit. A dedicated API
+connection listens for those references, reloads normalized earthquake data, and
+broadcasts it through a bounded WebSocket hub. Notification changes emit only a
+content-free public resynchronization hint; administrative details remain available
+exclusively through authenticated interfaces.
 
 ## Ingestion flow
 

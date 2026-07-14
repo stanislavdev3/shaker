@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Earthquake Service API
-  version: 1.0.0
+  version: 2026-07-14
   description: Reports earthquakes after external providers publish them and supports Telegram and webhook notifications. It is not an early-warning system.
   license:
     name: Proprietary
@@ -11,7 +11,7 @@ servers:
   - url: https://{host}
     variables:
       host:
-        default: api.earthquake-service.invalid
+        default: eq.screaming.dog
         description: Deployment-specific API host
 paths:
   /health/live:
@@ -29,7 +29,7 @@ paths:
         "200": {description: Service is ready}
         "400": {$ref: "#/components/responses/Problem"}
         "503": {$ref: "#/components/responses/Problem"}
-  /v1/earthquakes:
+  /api/earthquakes:
     get:
       summary: List earthquakes
       operationId: listEarthquakes
@@ -62,7 +62,7 @@ paths:
             application/geo+json:
               schema: {type: object}
         "400": {$ref: "#/components/responses/Problem"}
-  /v1/earthquakes/{earthquake_id}:
+  /api/earthquakes/{earthquake_id}:
     get:
       summary: Get earthquake details
       operationId: getEarthquake
@@ -73,7 +73,7 @@ paths:
           description: Earthquake details
           content: {application/json: {schema: {type: object, properties: {data: {$ref: "#/components/schemas/Earthquake"}}}}}
         "404": {$ref: "#/components/responses/Problem"}
-  /v1/stream:
+  /api/stream:
     get:
       summary: Open the realtime earthquake WebSocket stream
       operationId: streamEarthquakes
@@ -81,7 +81,7 @@ paths:
       responses:
         "101": {description: WebSocket connection established}
         "400": {$ref: "#/components/responses/Problem"}
-  /v1/admin/earthquakes/{earthquake_id}/revisions:
+  /admin/api/earthquakes/{earthquake_id}/revisions:
     get:
       summary: List earthquake revisions
       operationId: listEarthquakeRevisions
@@ -92,7 +92,7 @@ paths:
       responses:
         "200": {description: Revision list}
         "401": {$ref: "#/components/responses/Problem"}
-  /v1/admin/notification-subscriptions:
+  /admin/api/notification-subscriptions:
     get:
       summary: List notification subscriptions
       operationId: listNotificationSubscriptions
@@ -108,7 +108,7 @@ paths:
       responses:
         "201": {description: Created; generated webhook_secret is returned once}
         "400": {$ref: "#/components/responses/Problem"}
-  /v1/admin/notification-subscriptions/{id}:
+  /admin/api/notification-subscriptions/{id}:
     parameters:
       - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
     get:
@@ -127,20 +127,20 @@ paths:
       operationId: disableNotificationSubscription
       security: [{adminKey: []}]
       responses: {"204": {description: Disabled}, "404": {$ref: "#/components/responses/Problem"}}
-  /v1/admin/notification-deliveries:
+  /admin/api/notification-deliveries:
     get:
       summary: List notification deliveries
       operationId: listNotificationDeliveries
       security: [{adminKey: []}]
       responses: {"200": {description: Most recent deliveries}, "401": {$ref: "#/components/responses/Problem"}}
-  /v1/admin/notification-deliveries/{id}:
+  /admin/api/notification-deliveries/{id}:
     get:
       summary: Get a notification delivery
       operationId: getNotificationDelivery
       security: [{adminKey: []}]
       parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
       responses: {"200": {description: Delivery}, "404": {$ref: "#/components/responses/Problem"}}
-  /v1/admin/notification-deliveries/{id}/retry:
+  /admin/api/notification-deliveries/{id}/retry:
     post:
       summary: Retry a notification delivery
       operationId: retryNotificationDelivery

@@ -1,0 +1,38 @@
+{{define "content"}}
+<form class="filters" method="get">
+  <label>Provider
+    <select class="form-select" name="provider">
+      <option value="">All providers</option>
+      <option value="emsc" {{if eq .Filters.Provider "emsc"}}selected{{end}}>EMSC</option>
+      <option value="usgs" {{if eq .Filters.Provider "usgs"}}selected{{end}}>USGS</option>
+    </select>
+  </label>
+  <label>Lifecycle
+    <select class="form-select" name="lifecycle">
+      <option value="">Any lifecycle</option>
+      <option value="preliminary" {{if eq .Filters.Lifecycle "preliminary"}}selected{{end}}>Preliminary</option>
+      <option value="confirmed" {{if eq .Filters.Lifecycle "confirmed"}}selected{{end}}>Confirmed</option>
+      <option value="reviewed" {{if eq .Filters.Lifecycle "reviewed"}}selected{{end}}>Reviewed</option>
+      <option value="retracted" {{if eq .Filters.Lifecycle "retracted"}}selected{{end}}>Retracted</option>
+    </select>
+  </label>
+  <label>Provider status<input class="form-control" name="status" value="{{.Filters.Status}}" placeholder="Any status"></label>
+  <label>Minimum magnitude<input class="form-control" name="min_magnitude" inputmode="decimal" value="{{inputNumber .Filters.MinMagnitude}}" placeholder="No minimum"></label>
+  <button class="btn btn-primary" type="submit">Apply filters</button>
+</form>
+<div class="card table-wrap">
+  <div class="table-meta"><span><strong>{{len .Incidents}}</strong> incidents on this page</span><span>Newest first</span></div>
+  <table class="table table-vcenter">
+    <thead><tr><th>Event</th><th>Magnitude</th><th>Location</th><th>Provider identity</th><th>Lifecycle</th><th>Revision</th></tr></thead>
+    <tbody>{{range .Incidents}}<tr>
+      <td><a class="primary" href="/admin/incidents/{{.ID}}">{{time .OccurredAt}}</a><span class="secondary-text mono">{{short .ID}}</span></td>
+      <td><span class="magnitude-mark">{{number .Magnitude}}</span></td>
+      <td><span class="primary">{{text .Place}}</span><span class="secondary-text">{{printf "%.3f, %.3f" .Latitude .Longitude}}</span></td>
+      <td><span class="status status-{{statusClass .Provider}}">{{.Provider}}</span><span class="secondary-text mono">{{.ExternalID}}</span></td>
+      <td><span class="status status-{{statusClass .Lifecycle}}">{{.Lifecycle}}</span></td>
+      <td><span class="mono">v{{.Version}}</span></td>
+    </tr>{{else}}<tr><td colspan="6" class="empty">No incidents match these filters.</td></tr>{{end}}</tbody>
+  </table>
+</div>
+{{if .NextCursor}}<a class="button secondary btn btn-ghost-secondary" href="?cursor={{urlquery .NextCursor}}&provider={{urlquery .Filters.Provider}}&lifecycle={{urlquery .Filters.Lifecycle}}&status={{urlquery .Filters.Status}}{{if .Filters.MinMagnitude}}&min_magnitude={{number .Filters.MinMagnitude}}{{end}}">Load older incidents</a>{{end}}
+{{end}}

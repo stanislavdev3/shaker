@@ -44,7 +44,7 @@ type Server struct {
 	realtime   *realtime.Hub
 }
 
-func New(repo *postgres.Repository, log *slog.Logger, c clock.Clock, m *observability.Metrics, admin string, cursorKey []byte, cipher *appnotification.Cipher, production bool, maxRadius float64, realtimeHub *realtime.Hub) http.Handler {
+func New(repo *postgres.Repository, log *slog.Logger, c clock.Clock, m *observability.Metrics, admin string, cursorKey []byte, cipher *appnotification.Cipher, production bool, maxRadius float64, realtimeHub *realtime.Hub, adminHandler http.Handler) http.Handler {
 	s := &Server{repo: repo, log: log, clock: c, metrics: m, adminKey: admin, cursorKey: cursorKey, cipher: cipher, production: production, maxRadius: maxRadius, realtime: realtimeHub}
 	r := chi.NewRouter()
 	r.Use(s.requestID, s.recoverer, s.accessLog, newRateLimiter(120, time.Minute).middleware)
@@ -53,24 +53,29 @@ func New(repo *postgres.Repository, log *slog.Logger, c clock.Clock, m *observab
 	})
 	r.Get("/health/ready", s.ready)
 	r.Handle("/metrics", promhttp.Handler())
-	r.Route("/v1", func(r chi.Router) {
-		r.Get("/earthquakes", s.list)
-		r.Get("/earthquakes/{id}", s.details)
-		r.Get("/stream", s.stream)
-		r.Route("/admin", func(r chi.Router) {
-			r.Use(s.adminAuth)
-			r.Get("/earthquakes/{id}/revisions", s.revisions)
-			r.Post("/notification-subscriptions", s.createSubscription)
-			r.Get("/notification-subscriptions", s.listSubscriptions)
-			r.Get("/notification-subscriptions/{id}", s.getSubscription)
-			r.Patch("/notification-subscriptions/{id}", s.patchSubscription)
-			r.Delete("/notification-subscriptions/{id}", s.deleteSubscription)
-			r.Get("/notification-deliveries", s.listDeliveries)
-			r.Get("/notification-deliveries/{id}", s.getDelivery)
-			r.Post("/notification-deliveries/{id}/retry", s.retryDelivery)
-		})
+	r.Route("/api", s.publicRoutes)
+	r.Route("/admin/api", func(r chi.Router) {
+		r.Use(s.adminAuth)
+		r.Get("/earthquakes/{id}/revisions", s.revisions)
+		r.Post("/notification-subscriptions", s.createSubscription)
+		r.Get("/notification-subscriptions", s.listSubscriptions)
+		r.Get("/notification-subscriptions/{id}", s.getSubscription)
+		r.Patch("/notification-subscriptions/{id}", s.patchSubscription)
+		r.Delete("/notification-subscriptions/{id}", s.deleteSubscription)
+		r.Get("/notification-deliveries", s.listDeliveries)
+		r.Get("/notification-deliveries/{id}", s.getDelivery)
+		r.Post("/notification-deliveries/{id}/retry", s.retryDelivery)
 	})
+	if adminHandler != nil {
+		r.Mount("/admin", adminHandler)
+	}
 	return otelhttp.NewHandler(r, "http.server")
+}
+
+func (s *Server) publicRoutes(r chi.Router) {
+	r.Get("/earthquakes", s.list)
+	r.Get("/earthquakes/{id}", s.details)
+	r.Get("/stream", s.stream)
 }
 
 type listResponse struct {

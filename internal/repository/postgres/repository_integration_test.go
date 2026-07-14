@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/example/earthquake-service/internal/administration"
 	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/domain/notification"
 )
@@ -27,13 +28,107 @@ func integrationRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	t.Cleanup(repo.Pool.Close)
-	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE notification_intensity_evaluations,telegram_alert_messages,notification_deliveries,notification_subscriptions,
+	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE admin_audit_log,admin_role_bindings,
+		notification_intensity_evaluations,telegram_alert_messages,notification_deliveries,notification_subscriptions,
 		provider_observations,earthquake_source_associations,earthquake_revisions,earthquake_source_records,earthquakes,
 		ingestion_runs,provider_state CASCADE`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+func TestAdministrationRolesAndAppendOnlyAudit(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := r.BootstrapOwners(ctx, []string{"admin@example.com"}, now); err != nil {
+		t.Fatal(err)
+	}
+	role, err := r.RoleForEmail(ctx, "admin@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role != administration.Owner {
+		t.Fatalf("role=%q", role)
+	}
+	if err := r.BootstrapOwners(ctx, []string{"admin@example.com"}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := r.Pool.QueryRow(ctx, `SELECT count(*) FROM admin_role_bindings WHERE email=$1`, "admin@example.com").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("bindings=%d", count)
+	}
+	var auditID uuid.UUID
+	err = r.Pool.QueryRow(ctx, `INSERT INTO admin_audit_log(id,actor_subject,actor_email,actor_role,action,
+		resource_type,resource_id,created_at) VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+		"subject", "admin@example.com", "owner", "test", "subscription", "resource-1", now).Scan(&auditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Pool.Exec(ctx, `UPDATE admin_audit_log SET action=$2 WHERE id=$1`, auditID, "changed"); err == nil {
+		t.Fatal("expected append-only audit update rejection")
+	}
+	if _, err := r.Pool.Exec(ctx, `DELETE FROM admin_audit_log WHERE id=$1`, auditID); err == nil {
+		t.Fatal("expected append-only audit delete rejection")
+	}
+}
+
+func TestAdministrationReadModels(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	subscription, err := r.CreateSubscription(ctx, notification.Subscription{
+		Name: "admin-read-model", Status: "active", Channel: "webhook",
+		WebhookURL: "https://receiver.example/hook", EncryptedWebhookSecret: []byte("must-not-be-read"),
+		NotifyOnNew: true, MaximumEventAge: 2 * time.Hour,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{testEvent("admin-read-model", now, 5.2)}, "realtime", true, now); err != nil {
+		t.Fatal(err)
+	}
+	incidents, err := r.ListAdminIncidents(ctx, administration.IncidentFilter{Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 1 {
+		t.Fatalf("incidents=%d", len(incidents))
+	}
+	detail, err := r.AdminIncident(ctx, incidents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Sources) != 1 || len(detail.Observations) != 1 || len(detail.Associations) != 1 {
+		t.Fatalf("unexpected incident detail: %+v", detail)
+	}
+	subscriptions, err := r.ListAdminSubscriptions(ctx, administration.PageFilter{Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subscriptions) != 1 || subscriptions[0].ID != subscription.ID {
+		t.Fatalf("subscriptions=%+v", subscriptions)
+	}
+	if len(subscriptions[0].EncryptedWebhookSecret) != 0 {
+		t.Fatal("admin subscription query returned encrypted webhook secret")
+	}
+	notifications, err := r.ListAdminNotifications(ctx, administration.NotificationFilter{
+		PageFilter: administration.PageFilter{Limit: 50}, DeliveryClass: "webhook",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notifications) != 1 || notifications[0].SubscriptionID != subscription.ID ||
+		notifications[0].DeliveryClass != "webhook" || len(notifications[0].Payload) == 0 {
+		t.Fatalf("notifications=%+v", notifications)
+	}
+	if _, err := r.AdminNotification(ctx, notifications[0].ID); err != nil {
+		t.Fatal(err)
+	}
 }
 func testEvent(id string, updated time.Time, mag float64) earthquake.Event {
 	raw, _ := json.Marshal(map[string]any{"id": id, "updated": updated.UnixMilli(), "mag": mag})

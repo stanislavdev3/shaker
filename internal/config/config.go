@@ -26,6 +26,10 @@ type Config struct {
 	NotificationBatchSize, NotificationMaxAttempts                       int
 	NotificationLockTimeout, NotificationPollInterval                    time.Duration
 	AdminAPIKey                                                          string
+	AdminEnabled                                                         bool
+	AdminHost, CloudflareAccessTeamDomain, CloudflareAccessAudience      string
+	AdminBootstrapOwners                                                 []string
+	AdminDevelopmentEmail, GrafanaBaseURL                                string
 	EncryptionKey                                                        []byte
 	WebhookAllowPrivate                                                  bool
 	WebhookHTTPTimeout                                                   time.Duration
@@ -47,6 +51,10 @@ func Load(roleOverride string) (Config, error) {
 		EMSCWebSocketURL: env("EMSC_WEBSOCKET_URL", "wss://www.seismicportal.eu/standing_order/websocket"),
 		EMSCFDSNURL:      env("EMSC_FDSN_URL", "https://www.seismicportal.eu/fdsnws/event/1/query"),
 		AdminAPIKey:      os.Getenv("ADMIN_API_KEY"), LogLevel: env("LOG_LEVEL", "info"), OTELEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		AdminHost: os.Getenv("ADMIN_HOST"), CloudflareAccessTeamDomain: os.Getenv("CLOUDFLARE_ACCESS_TEAM_DOMAIN"),
+		CloudflareAccessAudience: os.Getenv("CLOUDFLARE_ACCESS_AUDIENCE"),
+		AdminBootstrapOwners:     splitCSV(os.Getenv("ADMIN_BOOTSTRAP_OWNERS")),
+		AdminDevelopmentEmail:    os.Getenv("ADMIN_DEVELOPMENT_EMAIL"), GrafanaBaseURL: os.Getenv("GRAFANA_BASE_URL"),
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), TelegramAPIURL: env("TELEGRAM_API_URL", "https://api.telegram.org"),
 		TelegramGlobalChannel: os.Getenv("TELEGRAM_GLOBAL_CHANNEL"),
 	}
@@ -126,6 +134,10 @@ func Load(roleOverride string) (Config, error) {
 	if err != nil {
 		return c, err
 	}
+	c.AdminEnabled, err = boolEnv("ADMIN_ENABLED", false)
+	if err != nil {
+		return c, err
+	}
 	c.WebhookHTTPTimeout, err = durationEnv("WEBHOOK_HTTP_TIMEOUT", 15*time.Second)
 	if err != nil {
 		return c, err
@@ -161,6 +173,29 @@ func Load(roleOverride string) (Config, error) {
 	if c.AdminAPIKey == "" {
 		return c, errors.New("ADMIN_API_KEY is required")
 	}
+	if c.AdminEnabled {
+		if c.AdminHost == "" || strings.Contains(c.AdminHost, "://") || strings.ContainsAny(c.AdminHost, " /\t\r\n") {
+			return c, errors.New("ADMIN_HOST must be a hostname without a URL scheme")
+		}
+		if c.Environment == "development" && c.AdminDevelopmentEmail != "" {
+			if len(c.AdminBootstrapOwners) == 0 {
+				return c, errors.New("ADMIN_BOOTSTRAP_OWNERS is required when administration is enabled")
+			}
+		} else if c.CloudflareAccessTeamDomain == "" || c.CloudflareAccessAudience == "" {
+			return c, errors.New("cloudflare access team domain and audience are required when administration is enabled")
+		}
+		if c.AdminDevelopmentEmail == "" {
+			if err := validateCloudflareTeamDomain(c.CloudflareAccessTeamDomain); err != nil {
+				return c, err
+			}
+		}
+		if c.Environment != "development" && c.AdminDevelopmentEmail != "" {
+			return c, errors.New("ADMIN_DEVELOPMENT_EMAIL is development-only")
+		}
+		if len(c.AdminBootstrapOwners) == 0 {
+			return c, errors.New("ADMIN_BOOTSTRAP_OWNERS is required when administration is enabled")
+		}
+	}
 	if len(c.EncryptionKey) != 32 {
 		return c, errors.New("SECRETS_ENCRYPTION_KEY must be base64 encoding of exactly 32 bytes")
 	}
@@ -195,6 +230,23 @@ func validateEndpoint(name, value string, schemes ...string) error {
 		}
 	}
 	return fmt.Errorf("%s has unsupported URL scheme %q", name, parsed.Scheme)
+}
+
+func validateCloudflareTeamDomain(value string) error {
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return errors.New("CLOUDFLARE_ACCESS_TEAM_DOMAIN must be an HTTPS cloudflareaccess.com team domain")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		!strings.HasSuffix(hostname, ".cloudflareaccess.com") {
+		return errors.New("CLOUDFLARE_ACCESS_TEAM_DOMAIN must be an HTTPS cloudflareaccess.com team domain")
+	}
+	return nil
 }
 
 func env(k, fallback string) string {
@@ -242,4 +294,14 @@ func keyEnv(k string) ([]byte, error) {
 		return nil, fmt.Errorf("%s must be base64: %w", k, e)
 	}
 	return b, nil
+}
+
+func splitCSV(value string) []string {
+	var values []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
 }

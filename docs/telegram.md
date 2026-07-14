@@ -94,8 +94,9 @@ threshold crossing for an incident that was not previously delivered creates the
 message.
 
 The existing baseline, backfill, recovery, retry, and at-least-once rules also apply to
-Telegram. A material canonical revision that crosses the configured minimum magnitude
-can create a threshold-crossing alert.
+Telegram. A material canonical revision that crosses a personal subscription's MMI
+threshold can create its first alert. Legacy subscriptions retain magnitude-threshold
+crossing behavior until the user switches to MMI.
 
 ## Global channel
 

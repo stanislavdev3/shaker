@@ -1,0 +1,17 @@
+{{define "content"}}
+<p class="notice">Personal identifiers and precise coordinates are masked. Telegram preferences remain controlled by the user.</p>
+<div class="card table-wrap">
+  <div class="table-meta"><span><strong>{{len .Subscriptions}}</strong> subscriptions on this page</span><span>Sensitive fields masked</span></div>
+  <table class="table table-vcenter"><thead><tr><th>Subscription</th><th>Channel</th><th>Kind</th><th>Status</th><th>Language</th><th>MMI threshold</th><th>Legacy filter</th><th>Created</th></tr></thead><tbody>
+  {{range .Subscriptions}}<tr>
+    <td><a class="primary" href="/admin/subscriptions/{{.ID}}">{{subscriptionName .Name .Channel .SubscriptionKind .TelegramChatID}}</a><span class="secondary-text mono">{{short .ID}}</span></td>
+    <td><span class="status status-{{statusClass .Channel}}">{{.Channel}}</span></td>
+    <td>{{.SubscriptionKind}}</td>
+    <td><span class="status status-{{statusClass .Status}}">{{.Status}}</span></td>
+    <td>{{text .NotificationLanguage}}</td><td><strong>{{number .MinimumIntensity}}</strong></td>
+    <td>M {{number .MinimumMagnitude}} <span class="secondary-text">{{number .RadiusKM}} km radius</span></td><td>{{time .CreatedAt}}</td>
+  </tr>{{else}}<tr><td colspan="8" class="empty">No subscriptions found.</td></tr>{{end}}
+  </tbody></table>
+</div>
+{{if .NextCursor}}<a class="button secondary btn btn-ghost-secondary" href="?cursor={{urlquery .NextCursor}}">Load older subscriptions</a>{{end}}
+{{end}}

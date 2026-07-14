@@ -1,0 +1,21 @@
+{{define "content"}}
+<nav class="tabs" aria-label="Notification type">
+  <a class="tab {{if eq .NotificationType "telegram_channel"}}active{{end}}" href="?type=telegram_channel">Telegram channel</a>
+  <a class="tab {{if eq .NotificationType "telegram_private"}}active{{end}}" href="?type=telegram_private">Telegram private</a>
+  <a class="tab {{if eq .NotificationType "webhook"}}active{{end}}" href="?type=webhook">Webhooks</a>
+</nav>
+<div class="card table-wrap">
+  <div class="table-meta"><span><strong>{{len .Notifications}}</strong> notifications on this page</span><span>{{.NotificationType}}</span></div>
+  <table class="table table-vcenter"><thead><tr><th>Notification</th><th>Transport</th><th>Status</th><th>Incident</th><th>Subscription</th><th>Version</th><th>Attempts</th><th>Next action</th></tr></thead><tbody>
+  {{range .Notifications}}<tr>
+    <td><a class="primary" href="/admin/notifications/{{.ID}}">{{time .CreatedAt}}</a><span class="secondary-text mono">{{short .ID}}</span></td>
+    <td><span class="status status-{{statusClass .Kind}}">{{.Kind}}</span></td>
+    <td><span class="status status-{{statusClass .Status}}">{{.Status}}</span></td>
+    <td><a class="mono" href="/admin/incidents/{{.EarthquakeID}}">{{short .EarthquakeID}}</a></td>
+    <td><a class="mono" href="/admin/subscriptions/{{.SubscriptionID}}">{{short .SubscriptionID}}</a></td>
+    <td><span class="mono">v{{.EarthquakeVersion}}</span></td><td>{{.AttemptCount}}</td><td>{{time .NextAttemptAt}}</td>
+  </tr>{{else}}<tr><td colspan="8" class="empty">No notification work items found.</td></tr>{{end}}
+  </tbody></table>
+</div>
+{{if .NextCursor}}<a class="button secondary btn btn-ghost-secondary" href="?type={{urlquery .NotificationType}}&cursor={{urlquery .NextCursor}}">Load older notifications</a>{{end}}
+{{end}}

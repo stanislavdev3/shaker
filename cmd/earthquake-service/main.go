@@ -18,8 +18,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/example/earthquake-service/internal/administration"
 	"github.com/example/earthquake-service/internal/clock"
 	"github.com/example/earthquake-service/internal/config"
+	"github.com/example/earthquake-service/internal/httpadmin"
 	"github.com/example/earthquake-service/internal/httpapi"
 	"github.com/example/earthquake-service/internal/ingestion"
 	"github.com/example/earthquake-service/internal/notification"
@@ -109,6 +111,26 @@ func runAPI(ctx context.Context, cfg config.Config, repo *postgres.Repository, c
 	go hub.Run(ctx)
 	go realtime.NewListener(repo.Pool, repo, hub, log).Run(ctx)
 
+	var adminHandler http.Handler
+	if cfg.AdminEnabled {
+		adminService := administration.New(repo, clock.Real{}.Now)
+		if err := adminService.BootstrapOwners(ctx, cfg.AdminBootstrapOwners); err != nil {
+			return fmt.Errorf("bootstrap administration owners: %w", err)
+		}
+		var err error
+		adminHandler, err = httpadmin.New(adminService, log, httpadmin.Config{
+			Host:             cfg.AdminHost,
+			TeamDomain:       cfg.CloudflareAccessTeamDomain,
+			Audience:         cfg.CloudflareAccessAudience,
+			DevelopmentEmail: cfg.AdminDevelopmentEmail,
+			GrafanaBaseURL:   cfg.GrafanaBaseURL,
+			CSRFKey:          cfg.CursorHMACKey,
+			Now:              clock.Real{}.Now,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize administration interface: %w", err)
+		}
+	}
 	handler := httpapi.New(
 		repo,
 		log,
@@ -120,6 +142,7 @@ func runAPI(ctx context.Context, cfg config.Config, repo *postgres.Repository, c
 		cfg.Environment == "production",
 		cfg.MaxSearchRadiusKM,
 		hub,
+		adminHandler,
 	)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddress,

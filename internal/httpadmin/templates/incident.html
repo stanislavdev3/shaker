@@ -1,0 +1,60 @@
+{{define "content"}}
+{{$event := .Incident.Incident}}
+<section class="incident-hero panel">
+  <div class="hero-magnitude"><small>Magnitude</small><strong>{{number $event.Magnitude}}</strong><span>{{text $event.MagnitudeType}}</span></div>
+  <div class="hero-copy">
+    <div class="hero-status"><span class="status status-{{statusClass $event.Lifecycle}}">{{$event.Lifecycle}}</span><span class="status status-{{statusClass $event.Provider}}">{{$event.Provider}}</span></div>
+    <h2>{{text $event.Place}}</h2>
+    <p>{{time $event.OccurredAt}} · {{number $event.DepthKM}} km depth · revision <span class="mono">v{{$event.Version}}</span></p>
+  </div>
+  <a class="button secondary btn btn-ghost-secondary" href="https://www.openstreetmap.org/?mlat={{$event.Latitude}}&mlon={{$event.Longitude}}#map=6/{{$event.Latitude}}/{{$event.Longitude}}">Open map</a>
+</section>
+
+<section class="cards">
+  <article><h2>Canonical solution</h2><dl>
+    <dt>Occurred</dt><dd>{{time $event.OccurredAt}}</dd>
+    <dt>Coordinates</dt><dd class="mono">{{printf "%.5f, %.5f" $event.Latitude $event.Longitude}}</dd>
+    <dt>Depth</dt><dd>{{number $event.DepthKM}} km</dd>
+    <dt>Lifecycle</dt><dd><span class="status status-{{statusClass $event.Lifecycle}}">{{$event.Lifecycle}}</span></dd>
+    <dt>Preferred source</dt><dd>{{$event.Provider}} / <span class="mono">{{$event.ExternalID}}</span></dd>
+    <dt>Source updated</dt><dd>{{time $event.SourceUpdatedAt}}</dd>
+    <dt>First seen</dt><dd>{{time $event.FirstSeenAt}}</dd>
+    <dt>Last seen</dt><dd>{{time $event.LastSeenAt}}</dd>
+  </dl></article>
+  <article><h2>Canonical provenance</h2><pre>{{json .Incident.Provenance}}</pre></article>
+</section>
+
+<div class="section-heading"><div><h2>Provider sources</h2><p>Current source records associated with the canonical incident.</p></div><span>{{len .Incident.Sources}}</span></div>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Provider</th><th>External identity</th><th>Solution</th><th>Channel</th><th>Version</th><th>Updated</th><th>Source links</th></tr></thead><tbody>
+{{range .Incident.Sources}}<tr>
+  <td><span class="status status-{{statusClass .Provider}}">{{.Provider}}</span></td><td class="mono">{{.ExternalID}}</td>
+  <td><span class="status status-{{statusClass .SolutionClass}}">{{.SolutionClass}}</span></td><td>{{.LatestObservationChannel}}</td>
+  <td class="mono">v{{.Version}}</td><td>{{time .SourceUpdatedAt}}</td><td>{{if .SourceURL}}<a href="{{.SourceURL}}">Source</a>{{end}} {{if .DetailURL}}<a href="{{.DetailURL}}">Details</a>{{end}}</td>
+</tr>{{else}}<tr><td colspan="7" class="empty">No source records.</td></tr>{{end}}</tbody></table></div>
+
+<div class="section-heading"><div><h2>Associations</h2><p>Correlation decisions and preserved evidence.</p></div><span>{{len .Incident.Associations}}</span></div>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Source</th><th>Method</th><th>Confidence</th><th>Algorithm</th><th>State</th><th>Evidence</th></tr></thead><tbody>
+{{range .Incident.Associations}}<tr>
+  <td class="mono">{{short .SourceRecordID}}</td><td>{{.Method}}</td><td>{{number .Confidence}}</td><td class="mono">{{text .AlgorithmVersion}}</td>
+  <td>{{if .Active}}<span class="status status-success">active</span>{{else}}<span class="status status-neutral">ended</span>{{end}}</td><td><pre>{{json .Evidence}}</pre></td>
+</tr>{{else}}<tr><td colspan="6" class="empty">No associations.</td></tr>{{end}}</tbody></table></div>
+
+<div class="section-heading"><div><h2>Provider observations</h2><p>Immutable observations received across realtime and catalogue channels.</p></div><span>{{len .Incident.Observations}}</span></div>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Received</th><th>Source</th><th>Version</th><th>Channel</th><th>Solution</th><th>Source updated</th></tr></thead><tbody>
+{{range .Incident.Observations}}<tr>
+  <td>{{time .ReceivedAt}}</td><td class="mono">{{short .SourceRecordID}}</td><td class="mono">v{{.SourceVersion}}</td><td>{{.Channel}}</td>
+  <td><span class="status status-{{statusClass .SolutionClass}}">{{.SolutionClass}}</span></td><td>{{time .SourceUpdatedAt}}</td>
+</tr>{{else}}<tr><td colspan="6" class="empty">No observations.</td></tr>{{end}}</tbody></table></div>
+
+<div class="section-heading"><div><h2>Local intensity evaluations</h2><p>Expected shaking at subscriber locations, including uncertainty bounds.</p></div><span>{{len .Incident.Evaluations}}</span></div>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Created</th><th>Subscription</th><th>Model</th><th>MMI mean</th><th>Upper</th><th>Threshold</th><th>Distance</th><th>Decision</th></tr></thead><tbody>
+{{range .Incident.Evaluations}}<tr>
+  <td>{{time .CreatedAt}}</td><td><a class="mono" href="/admin/subscriptions/{{.SubscriptionID}}">{{short .SubscriptionID}}</a></td><td>{{.ModelName}} <span class="secondary-text">{{.ModelVersion}}</span></td>
+  <td><strong>{{printf "%.2f" .MeanMMI}}</strong></td><td>{{printf "%.2f" .UpperMMI}}</td><td>{{printf "%.1f" .ThresholdMMI}}</td><td>{{printf "%.1f km" .EpicentralDistanceKM}}</td>
+  <td><span class="status status-{{statusClass .Decision}}">{{.Decision}}</span></td>
+</tr>{{else}}<tr><td colspan="8" class="empty">No intensity evaluations.</td></tr>{{end}}</tbody></table></div>
+
+<div class="section-heading"><div><h2>Canonical revisions</h2><p>Versioned changes to the canonical incident.</p></div><span>{{len .Incident.Revisions}}</span></div>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Version</th><th>Source updated</th><th>Recorded</th><th>Changed fields</th></tr></thead><tbody>
+{{range .Incident.Revisions}}<tr><td class="mono">v{{.Version}}</td><td>{{time .SourceUpdatedAt}}</td><td>{{time .CreatedAt}}</td><td><pre>{{json .ChangedFields}}</pre></td></tr>{{else}}<tr><td colspan="4" class="empty">No revisions.</td></tr>{{end}}</tbody></table></div>
+{{end}}

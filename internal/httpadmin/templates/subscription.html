@@ -1,0 +1,25 @@
+{{define "content"}}{{$item := .Subscription}}
+<p class="notice">Sensitive values stay masked for every role until the audited reveal workflow is available.</p>
+<section class="cards">
+  <article><h2>Subscription configuration</h2><dl>
+    <dt>Name</dt><dd><strong>{{subscriptionName $item.Name $item.Channel $item.SubscriptionKind $item.TelegramChatID}}</strong></dd>
+    <dt>Status</dt><dd><span class="status status-{{statusClass $item.Status}}">{{$item.Status}}</span></dd>
+    <dt>Channel</dt><dd><span class="status status-{{statusClass $item.Channel}}">{{$item.Channel}}</span></dd>
+    <dt>Kind</dt><dd>{{$item.SubscriptionKind}}</dd>
+    <dt>Language</dt><dd>{{text $item.NotificationLanguage}}</dd>
+    <dt>MMI threshold</dt><dd><span class="magnitude">{{number $item.MinimumIntensity}}</span></dd>
+    <dt>Legacy magnitude</dt><dd>{{number $item.MinimumMagnitude}} – {{number $item.MaximumMagnitude}}</dd>
+    <dt>Legacy radius</dt><dd>{{number $item.RadiusKM}} km</dd>
+    <dt>Created</dt><dd>{{time $item.CreatedAt}}</dd><dt>Updated</dt><dd>{{time $item.UpdatedAt}}</dd>
+  </dl></article>
+  <article><h2>Masked destination</h2><dl>
+    <dt>Telegram chat</dt><dd class="mono">{{chat $item.TelegramChatID}}</dd>
+    <dt>Username</dt><dd>{{username $item.TelegramChatUsername}}</dd>
+    <dt>Location</dt><dd>{{coordinate $item.CenterLatitude}}, {{coordinate $item.CenterLongitude}}</dd>
+    <dt>Webhook</dt><dd>{{webhook $item.WebhookURL}}</dd>
+    <dt>New incidents</dt><dd>{{bool $item.NotifyOnNew}}</dd>
+    <dt>Threshold crossing</dt><dd>{{bool $item.NotifyOnThresholdCrossing}}</dd>
+    <dt>Maximum event age</dt><dd>{{$item.MaximumEventAge}}</dd>
+  </dl></article>
+</section>
+{{end}}

@@ -1,0 +1,16 @@
+{{define "content"}}{{$item := .Notification}}
+<section class="cards">
+  <article><h2>Delivery state</h2><dl>
+    <dt>Transport</dt><dd><span class="status status-{{statusClass $item.Kind}}">{{$item.Kind}}</span></dd>
+    <dt>Status</dt><dd><span class="status status-{{statusClass $item.Status}}">{{$item.Status}}</span></dd>
+    <dt>Incident</dt><dd><a class="mono" href="/admin/incidents/{{$item.EarthquakeID}}">{{$item.EarthquakeID}}</a></dd>
+    <dt>Subscription</dt><dd><a class="mono" href="/admin/subscriptions/{{$item.SubscriptionID}}">{{$item.SubscriptionID}}</a></dd>
+    <dt>Desired version</dt><dd><span class="mono">v{{$item.EarthquakeVersion}}</span></dd>
+    <dt>Delivered version</dt><dd>{{if $item.DeliveredVersion}}<span class="mono">v{{$item.DeliveredVersion}}</span>{{else}}—{{end}}</dd>
+    <dt>Attempts</dt><dd>{{$item.AttemptCount}}</dd><dt>Next attempt</dt><dd>{{time $item.NextAttemptAt}}</dd>
+    <dt>Created</dt><dd>{{time $item.CreatedAt}}</dd><dt>Updated</dt><dd>{{time $item.UpdatedAt}}</dd>
+    <dt>Last error</dt><dd>{{text $item.LastError}}</dd>
+  </dl></article>
+  <article><h2>Payload preview</h2><pre>{{json $item.Payload}}</pre></article>
+</section>
+{{end}}
