@@ -1,0 +1,226 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/example/earthquake-service/internal/clock"
+	"github.com/example/earthquake-service/internal/config"
+	"github.com/example/earthquake-service/internal/httpapi"
+	"github.com/example/earthquake-service/internal/ingestion"
+	"github.com/example/earthquake-service/internal/notification"
+	"github.com/example/earthquake-service/internal/observability"
+	"github.com/example/earthquake-service/internal/provider/usgs"
+	"github.com/example/earthquake-service/internal/realtime"
+	"github.com/example/earthquake-service/internal/repository/postgres"
+	"github.com/example/earthquake-service/internal/telegram"
+)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		if err := healthcheck(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	role := ""
+	if len(os.Args) > 1 {
+		role = os.Args[1]
+	}
+	cfg, err := config.Load(role)
+	if err != nil {
+		fatal("load configuration", err)
+	}
+	log := newLogger(cfg.LogLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	repo, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.DatabaseMinConnections, cfg.DatabaseMaxConnections)
+	if err != nil {
+		fatal("connect to database", err)
+	}
+	defer repo.Pool.Close()
+
+	cipher, err := notification.NewCipher(cfg.EncryptionKey)
+	if err != nil {
+		fatal("initialize secrets cipher", err)
+	}
+	userAgent := "earthquake-service/" + cfg.Version
+	provider := usgs.New(cfg.USGSRealtimeURL, cfg.USGSFDSNURL, userAgent, cfg.USGSHTTPTimeout, cfg.USGSMaxResponseBytes)
+	ingestionService := ingestion.New(provider, repo, clock.Real{}, log)
+	var telegramClient *telegram.Client
+	if (cfg.Role == "worker" || cfg.Role == "all") && cfg.TelegramBotToken != "" {
+		telegramClient = telegram.NewClient(cfg.TelegramAPIURL, cfg.TelegramBotToken, cfg.TelegramPollTimeout, cfg.TelegramMaxResponseBytes)
+		if cfg.TelegramGlobalChannel != "" {
+			subscription, registerErr := telegram.RegisterGlobalChannel(ctx, repo, telegramClient, cfg.TelegramGlobalChannel, clock.Real{}.Now())
+			if registerErr != nil {
+				fatal("register Telegram global channel", registerErr)
+			}
+			log.Info("Telegram global channel enabled", "channel", cfg.TelegramGlobalChannel, "subscription_id", subscription.ID)
+		}
+	}
+
+	switch cfg.Role {
+	case "api":
+		err = runAPI(ctx, cfg, repo, cipher, log)
+	case "worker":
+		runWorker(ctx, cfg, ingestionService, repo, cipher, userAgent, telegramClient, log)
+	case "all":
+		go runWorker(ctx, cfg, ingestionService, repo, cipher, userAgent, telegramClient, log)
+		err = runAPI(ctx, cfg, repo, cipher, log)
+	case "backfill":
+		err = runBackfill(ctx, cfg, ingestionService, os.Args[2:])
+	default:
+		err = fmt.Errorf("unsupported role %q", cfg.Role)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		fatal("service stopped", err)
+	}
+}
+
+func runAPI(ctx context.Context, cfg config.Config, repo *postgres.Repository, cipher *notification.Cipher, log *slog.Logger) error {
+	hub := realtime.NewHub()
+	go hub.Run(ctx)
+	go realtime.NewListener(repo.Pool, repo, hub, log).Run(ctx)
+
+	handler := httpapi.New(
+		repo,
+		log,
+		clock.Real{},
+		observability.NewMetrics(prometheus.DefaultRegisterer),
+		cfg.AdminAPIKey,
+		cfg.CursorHMACKey,
+		cipher,
+		cfg.Environment == "production",
+		cfg.MaxSearchRadiusKM,
+		hub,
+	)
+	server := &http.Server{
+		Addr:              cfg.HTTPAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		log.Info("HTTP server started", "address", cfg.HTTPAddress, "version", cfg.Version)
+		errCh <- server.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func runWorker(ctx context.Context, cfg config.Config, ingestionService *ingestion.Service, repo *postgres.Repository, cipher *notification.Cipher, userAgent string, telegramClient *telegram.Client, log *slog.Logger) {
+	if from, to, err := ingestionService.RecoveryRange(ctx, cfg.RecoveryOverlapDuration); err != nil {
+		log.Error("calculate recovery range", "error", err)
+	} else if from != nil && to != nil {
+		if err := ingestionService.RunBackfill(ctx, *from, *to, cfg.BackfillChunkDuration, "recovery"); err != nil {
+			log.Error("recovery backfill failed", "from", from, "to", to, "error", err)
+		}
+	}
+
+	workerID := "earthquake-service-" + uuid.NewString()
+	if telegramClient != nil {
+		go telegram.NewBot(repo, telegramClient, clock.Real{}, log).Run(ctx)
+		log.Info("Telegram bot polling enabled")
+	}
+	deliveryWorker := notification.NewWorker(
+		repo,
+		cipher,
+		clock.Real{},
+		log,
+		workerID,
+		userAgent,
+		cfg.NotificationBatchSize,
+		cfg.NotificationMaxAttempts,
+		cfg.NotificationLockTimeout,
+		cfg.NotificationPollInterval,
+		cfg.WebhookHTTPTimeout,
+		cfg.WebhookMaxResponseBytes,
+		cfg.WebhookAllowPrivate,
+		telegramClient,
+	)
+	go deliveryWorker.Run(ctx)
+	ingestionService.Run(ctx, cfg.USGSPollInterval)
+}
+
+func runBackfill(ctx context.Context, cfg config.Config, service *ingestion.Service, args []string) error {
+	flags := flag.NewFlagSet("backfill", flag.ContinueOnError)
+	fromValue := flags.String("from", "", "inclusive RFC3339 start time")
+	toValue := flags.String("to", "", "exclusive RFC3339 end time")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	from, err := time.Parse(time.RFC3339, *fromValue)
+	if err != nil {
+		return fmt.Errorf("parse --from: %w", err)
+	}
+	to, err := time.Parse(time.RFC3339, *toValue)
+	if err != nil {
+		return fmt.Errorf("parse --to: %w", err)
+	}
+	return service.RunBackfill(ctx, from, to, cfg.BackfillChunkDuration, "backfill")
+}
+
+func healthcheck() error {
+	address := os.Getenv("HTTP_ADDRESS")
+	if address == "" {
+		address = ":8080"
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid HTTP_ADDRESS: %w", err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get("http://" + net.JoinHostPort(host, port) + "/health/ready")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("readiness endpoint returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func newLogger(level string) *slog.Logger {
+	var parsed slog.Level
+	if err := parsed.UnmarshalText([]byte(strings.ToUpper(level))); err != nil {
+		parsed = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parsed}))
+}
+
+func fatal(message string, err error) {
+	slog.Error(message, "error", err)
+	os.Exit(1)
+}

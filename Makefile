@@ -2,23 +2,21 @@ GO ?= go
 GOCACHE ?= /tmp/earthquake-service-go-cache
 SERVER_DIR ?= ../../server
 DEPLOY_COMPOSE := $(SERVER_DIR)/services/screaming-dog/docker-compose.yml
+DEPLOY_MIGRATE_COMPOSE := deploy/docker-compose.migrate.yml
 DEPLOY_ENV := $(SERVER_DIR)/.env
 IMAGE ?= shaker:latest
+ATLAS_IMAGE ?= arigaio/atlas:1.2.3
+DEPLOY_MIGRATION_BASELINE ?= 202607130001
 export GOCACHE
 
-.PHONY: build image frontend frontend-test test test-unit test-integration lint fmt generate migrate migrate-down compose-up compose-down backfill openapi-check deploy
-frontend:
-	cd web && npm ci && npm run build
-	touch internal/httpapi/web/dist/.gitkeep
-frontend-test:
-	cd web && npm ci && npm test
-build: frontend
+.PHONY: build image test test-unit test-integration lint fmt generate migrate migrate-down compose-up compose-down backfill openapi-check deploy
+build:
 	$(GO) build ./cmd/earthquake-service
 image:
 	docker build --pull -t "$(IMAGE)" .
-test: frontend
+test:
 	$(GO) test ./...
-test-unit: frontend
+test-unit:
 	$(GO) test $$(go list ./... | grep -v /integration)
 test-integration:
 	$(GO) test -tags=integration ./internal/repository/postgres
@@ -43,5 +41,8 @@ openapi-check:
 deploy: image
 	test -f "$(DEPLOY_COMPOSE)"
 	test -f "$(DEPLOY_ENV)"
+	test -f "$(DEPLOY_MIGRATE_COMPOSE)"
+	SHAKER_IMAGE="$(IMAGE)" docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" up -d --wait postgres
+	SHAKER_REPOSITORY_DIR="$(CURDIR)" ATLAS_IMAGE="$(ATLAS_IMAGE)" DEPLOY_MIGRATION_BASELINE="$(DEPLOY_MIGRATION_BASELINE)" docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" -f "$(DEPLOY_MIGRATE_COMPOSE)" run --rm --no-deps migrate
 	SHAKER_IMAGE="$(IMAGE)" docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" up -d
 	docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" ps

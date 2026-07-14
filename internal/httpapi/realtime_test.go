@@ -52,18 +52,3 @@ func TestWebSocketStream(t *testing.T) {
 		t.Fatalf("unexpected broadcast: %+v", changed)
 	}
 }
-
-func TestEmbeddedFrontend(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	response := httptest.NewRecorder()
-	frontendHandler().ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d", response.Code)
-	}
-	if !strings.Contains(response.Body.String(), "Earthquake Monitor") {
-		t.Fatal("frontend content is missing")
-	}
-	if strings.Contains(response.Body.String(), "Delivery Lab") {
-		t.Fatal("removed delivery lab is present")
-	}
-}

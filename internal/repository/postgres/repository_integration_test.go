@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/domain/notification"
 )
@@ -25,7 +27,9 @@ func integrationRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	t.Cleanup(repo.Pool.Close)
-	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE notification_deliveries,notification_subscriptions,earthquake_revisions,earthquake_source_records,earthquakes,ingestion_runs,provider_state CASCADE`)
+	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE telegram_alert_messages,notification_deliveries,notification_subscriptions,
+		provider_observations,earthquake_source_associations,earthquake_revisions,earthquake_source_records,earthquakes,
+		ingestion_runs,provider_state CASCADE`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +85,48 @@ func TestIdempotentAndStaleUpsert(t *testing.T) {
 	}
 	if revisions != 1 {
 		t.Fatalf("revisions=%d", revisions)
+	}
+}
+
+func TestStaleCatalogueObservationConfirmsWithoutReplacingNewerParameters(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	preliminary := testEvent("emsc-confirmation", now, 5.1)
+	preliminary.Provider = "emsc"
+	preliminary.ObservationChannel = "emsc_websocket"
+	preliminary.SolutionClass = earthquake.PreliminarySolution
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{preliminary}, "backfill", true, now); err != nil {
+		t.Fatal(err)
+	}
+
+	confirmed := testEvent("emsc-confirmation", now.Add(-time.Minute), 4.7)
+	confirmed.Provider = "emsc"
+	confirmed.ObservationChannel = "emsc_fdsn"
+	confirmed.SolutionClass = earthquake.ConfirmedSolution
+	stats, err := r.ApplyBatch(ctx, []earthquake.Event{confirmed}, "backfill", true, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Updated != 1 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	var magnitude float64
+	var lifecycle string
+	var version int64
+	if err := r.Pool.QueryRow(ctx, `SELECT magnitude,lifecycle,version FROM earthquakes WHERE preferred_external_id=$1`,
+		preliminary.ExternalID).Scan(&magnitude, &lifecycle, &version); err != nil {
+		t.Fatal(err)
+	}
+	if magnitude != 5.1 || lifecycle != "confirmed" || version != 2 {
+		t.Fatalf("magnitude=%v lifecycle=%q version=%d", magnitude, lifecycle, version)
+	}
+	var observations int
+	if err := r.Pool.QueryRow(ctx, `SELECT count(*) FROM provider_observations`).Scan(&observations); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 2 {
+		t.Fatalf("observations=%d", observations)
 	}
 }
 func TestConcurrentUpsertSingleRecord(t *testing.T) {
@@ -202,6 +248,171 @@ func TestTransactionalDeliveryAndConcurrentClaim(t *testing.T) {
 	}
 	if claimed != 1 {
 		t.Fatalf("claimed=%d", claimed)
+	}
+}
+
+func TestTelegramSubscriptionCreatesDistanceAwareDelivery(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const chatID int64 = 42
+
+	if _, err := r.UpsertTelegramLocation(ctx, chatID, 40.1, 74.2, 1000, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ActivateTelegramSubscription(ctx, chatID, 4.5, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{testEvent("telegram-notify", now, 5.2)}, "realtime", true, now); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := r.ClaimTelegramAlertMessages(ctx, "telegram-worker", 10, 5*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs=%d", len(jobs))
+	}
+	if jobs[0].TelegramChatID != chatID {
+		t.Fatalf("unexpected delivery: %+v", jobs[0])
+	}
+	var payload struct {
+		Earthquake struct {
+			DistanceKM *float64 `json:"distance_km"`
+		} `json:"earthquake"`
+	}
+	if err := json.Unmarshal(jobs[0].DesiredPayload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Earthquake.DistanceKM == nil || *payload.Earthquake.DistanceKM > 0.01 {
+		t.Fatalf("distance=%v", payload.Earthquake.DistanceKM)
+	}
+}
+
+func TestGlobalTelegramChannelReceivesUnfilteredWorldwideIncident(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const chatID int64 = -10042
+
+	subscription, err := r.UpsertGlobalTelegramChannel(ctx, chatID, "@eqmonitor", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := r.UpsertGlobalTelegramChannel(ctx, chatID, "@eqmonitor", now.Add(time.Second))
+	if err != nil || repeated.ID != subscription.ID {
+		t.Fatalf("repeated=%+v err=%v", repeated, err)
+	}
+	event := testEvent("global-channel", now, 0.4)
+	event.Latitude = -55
+	event.Longitude = -130
+	eventType := "earthquake"
+	event.EventType = &eventType
+	event.Provider = "emsc"
+	event.ObservationChannel = "emsc_websocket"
+	event.SolutionClass = earthquake.PreliminarySolution
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "realtime", true, now); err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := r.ClaimTelegramAlertMessages(ctx, "global-channel-worker", 10, 5*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].SubscriptionID != subscription.ID || alerts[0].TelegramChatID != chatID {
+		t.Fatalf("alerts=%+v", alerts)
+	}
+	var payload struct {
+		Lifecycle  string `json:"lifecycle"`
+		Earthquake struct {
+			Magnitude  *float64 `json:"magnitude"`
+			DistanceKM *float64 `json:"distance_km"`
+		} `json:"earthquake"`
+	}
+	if err := json.Unmarshal(alerts[0].DesiredPayload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Lifecycle != "preliminary" || payload.Earthquake.Magnitude == nil || *payload.Earthquake.Magnitude != 0.4 || payload.Earthquake.DistanceKM != nil {
+		t.Fatalf("payload=%+v", payload)
+	}
+	if err := r.CompleteTelegramAlertMessage(ctx, alerts[0].ID, alerts[0].DesiredEarthquakeVersion, 77, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := testEvent("global-channel", now.Add(-time.Minute), 0.3)
+	confirmed.Provider = "emsc"
+	confirmed.EventType = &eventType
+	confirmed.ObservationChannel = "emsc_fdsn"
+	confirmed.SolutionClass = earthquake.ConfirmedSolution
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{confirmed}, "recovery", true, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := r.ClaimTelegramAlertMessages(ctx, "global-channel-worker", 10, 5*time.Minute, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 1 || updated[0].TelegramMessageID == nil || *updated[0].TelegramMessageID != 77 || updated[0].Lifecycle != "confirmed" {
+		t.Fatalf("updated=%+v", updated)
+	}
+}
+
+func TestIncidentObservationAndTelegramProjection(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const chatID int64 = 84
+
+	subscription, err := r.UpsertTelegramLocation(ctx, chatID, 40.1, 74.2, 1000, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testEvent("incident-projection", now, 5.1)
+	event.ObservationChannel = "usgs_realtime"
+	event.SolutionClass = earthquake.ReviewedSolution
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "backfill", true, now); err != nil {
+		t.Fatal(err)
+	}
+
+	var earthquakeID uuid.UUID
+	var lifecycle string
+	if err := r.Pool.QueryRow(ctx, `SELECT id,lifecycle FROM earthquakes WHERE preferred_external_id=$1`, event.ExternalID).
+		Scan(&earthquakeID, &lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle != "reviewed" {
+		t.Fatalf("lifecycle=%q", lifecycle)
+	}
+	var observations, associations int
+	if err := r.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM provider_observations),
+		(SELECT count(*) FROM earthquake_source_associations WHERE active)`).Scan(&observations, &associations); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 1 || associations != 1 {
+		t.Fatalf("observations=%d associations=%d", observations, associations)
+	}
+
+	alert, err := r.UpsertTelegramAlertMessage(ctx, subscription.ID, earthquakeID, 1, lifecycle, json.RawMessage(`{"text":"reviewed"}`), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alert.Status != "pending_send" || alert.TelegramChatID != chatID {
+		t.Fatalf("alert=%+v", alert)
+	}
+	claimed, err := r.ClaimTelegramAlertMessages(ctx, "projection-worker", 10, 5*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed=%d", len(claimed))
+	}
+	if err := r.CompleteTelegramAlertMessage(ctx, alert.ID, 1, 123, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := r.UpsertTelegramAlertMessage(ctx, subscription.ID, earthquakeID, 2, "confirmed", json.RawMessage(`{"text":"confirmed"}`), now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "pending_edit" || updated.TelegramMessageID == nil || *updated.TelegramMessageID != 123 {
+		t.Fatalf("updated=%+v", updated)
 	}
 }
 

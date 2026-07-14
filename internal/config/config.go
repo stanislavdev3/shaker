@@ -6,26 +6,30 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	Environment, Version, Role, HTTPAddress, DatabaseURL string
-	DatabaseMaxConnections, DatabaseMinConnections       int
-	USGSRealtimeURL, USGSFDSNURL                         string
-	USGSPollInterval, USGSHTTPTimeout                    time.Duration
-	USGSMaxResponseBytes                                 int64
-	BackfillChunkDuration, RecoveryOverlapDuration       time.Duration
-	NotificationBatchSize, NotificationMaxAttempts       int
-	NotificationLockTimeout, NotificationPollInterval    time.Duration
-	AdminAPIKey                                          string
-	EncryptionKey                                        []byte
-	WebhookAllowPrivate                                  bool
-	WebhookHTTPTimeout                                   time.Duration
-	WebhookMaxResponseBytes                              int64
-	LogLevel, OTELEndpoint                               string
-	MaxSearchRadiusKM                                    float64
-	CursorHMACKey                                        []byte
+	Environment, Version, Role, HTTPAddress, DatabaseURL    string
+	DatabaseMaxConnections, DatabaseMinConnections          int
+	USGSRealtimeURL, USGSFDSNURL                            string
+	USGSPollInterval, USGSHTTPTimeout                       time.Duration
+	USGSMaxResponseBytes                                    int64
+	BackfillChunkDuration, RecoveryOverlapDuration          time.Duration
+	NotificationBatchSize, NotificationMaxAttempts          int
+	NotificationLockTimeout, NotificationPollInterval       time.Duration
+	AdminAPIKey                                             string
+	EncryptionKey                                           []byte
+	WebhookAllowPrivate                                     bool
+	WebhookHTTPTimeout                                      time.Duration
+	WebhookMaxResponseBytes                                 int64
+	TelegramBotToken, TelegramAPIURL, TelegramGlobalChannel string
+	TelegramPollTimeout                                     time.Duration
+	TelegramMaxResponseBytes                                int64
+	LogLevel, OTELEndpoint                                  string
+	MaxSearchRadiusKM                                       float64
+	CursorHMACKey                                           []byte
 }
 
 func Load(roleOverride string) (Config, error) {
@@ -35,6 +39,8 @@ func Load(roleOverride string) (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"), USGSRealtimeURL: env("USGS_REALTIME_URL", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"),
 		USGSFDSNURL: env("USGS_FDSN_URL", "https://earthquake.usgs.gov/fdsnws/event/1/query"),
 		AdminAPIKey: os.Getenv("ADMIN_API_KEY"), LogLevel: env("LOG_LEVEL", "info"), OTELEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), TelegramAPIURL: env("TELEGRAM_API_URL", "https://api.telegram.org"),
+		TelegramGlobalChannel: os.Getenv("TELEGRAM_GLOBAL_CHANNEL"),
 	}
 	if roleOverride != "" {
 		c.Role = roleOverride
@@ -92,6 +98,14 @@ func Load(roleOverride string) (Config, error) {
 	if err != nil {
 		return c, err
 	}
+	c.TelegramPollTimeout, err = durationEnv("TELEGRAM_POLL_TIMEOUT", 25*time.Second)
+	if err != nil {
+		return c, err
+	}
+	c.TelegramMaxResponseBytes, err = int64Env("TELEGRAM_MAX_RESPONSE_BYTES", 1<<20)
+	if err != nil {
+		return c, err
+	}
 	c.WebhookAllowPrivate, err = boolEnv("WEBHOOK_ALLOW_PRIVATE_NETWORKS", c.Environment == "development")
 	if err != nil {
 		return c, err
@@ -116,6 +130,12 @@ func Load(roleOverride string) (Config, error) {
 	}
 	if c.Environment != "development" && c.WebhookAllowPrivate {
 		return c, errors.New("WEBHOOK_ALLOW_PRIVATE_NETWORKS is development-only")
+	}
+	if c.TelegramGlobalChannel != "" && c.TelegramBotToken == "" {
+		return c, errors.New("TELEGRAM_BOT_TOKEN is required when TELEGRAM_GLOBAL_CHANNEL is configured")
+	}
+	if c.TelegramGlobalChannel != "" && (!strings.HasPrefix(c.TelegramGlobalChannel, "@") || len(c.TelegramGlobalChannel) > 64 || strings.ContainsAny(c.TelegramGlobalChannel, " \t\r\n")) {
+		return c, errors.New("TELEGRAM_GLOBAL_CHANNEL must be a channel username starting with @")
 	}
 	return c, nil
 }

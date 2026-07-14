@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/example/earthquake-service/internal/domain/earthquake"
 )
+
+var ErrSubscriptionNotFound = errors.New("notification subscription not found")
 
 type Trigger string
 
@@ -24,8 +27,11 @@ type Subscription struct {
 	Name                      string
 	Status                    string
 	Channel                   string
+	SubscriptionKind          string
 	WebhookURL                string
 	EncryptedWebhookSecret    []byte
+	TelegramChatID            *int64
+	TelegramChatUsername      *string
 	MinimumMagnitude          *float64
 	MaximumMagnitude          *float64
 	CenterLatitude            *float64
@@ -44,7 +50,10 @@ type Subscription struct {
 }
 
 func (s Subscription) Validate(maxRadius float64, production bool) error {
-	if s.Name == "" || s.Channel != "webhook" {
+	if s.Name == "" || (s.Channel != "webhook" && s.Channel != "telegram") {
+		return ErrInvalidSubscription
+	}
+	if s.Channel == "telegram" && s.TelegramChatID == nil {
 		return ErrInvalidSubscription
 	}
 	geo := s.CenterLatitude != nil || s.CenterLongitude != nil || s.RadiusKM != nil
@@ -54,10 +63,12 @@ func (s Subscription) Validate(maxRadius float64, production bool) error {
 	if s.MinimumMagnitude != nil && s.MaximumMagnitude != nil && *s.MinimumMagnitude > *s.MaximumMagnitude {
 		return ErrInvalidMagnitudeRange
 	}
-	u, err := url.Parse(s.WebhookURL)
-	allowedScheme := u.Scheme == "https" || (!production && u.Scheme == "http")
-	if err != nil || u.Host == "" || u.User != nil || !allowedScheme {
-		return ErrInvalidWebhookURL
+	if s.Channel == "webhook" {
+		u, err := url.Parse(s.WebhookURL)
+		allowedScheme := u.Scheme == "https" || (!production && u.Scheme == "http")
+		if err != nil || u.Host == "" || u.User != nil || !allowedScheme {
+			return ErrInvalidWebhookURL
+		}
 	}
 	return nil
 }

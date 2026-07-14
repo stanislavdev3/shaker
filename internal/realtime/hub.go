@@ -51,7 +51,7 @@ func (h *Hub) Run(ctx context.Context) {
 				select {
 				case client <- message:
 				default:
-					// A slow browser receives a later resync signal instead of
+					// A slow client receives a later resync signal instead of
 					// applying unbounded backpressure to ingestion.
 				}
 			}

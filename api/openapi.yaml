@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Earthquake Service API
   version: 1.0.0
-  description: Reports earthquakes after external providers publish them. It is not an early-warning system.
+  description: Reports earthquakes after external providers publish them and supports Telegram and webhook notifications. It is not an early-warning system.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -14,17 +14,6 @@ servers:
         default: api.earthquake-service.invalid
         description: Deployment-specific API host
 paths:
-  /:
-    get:
-      summary: Open the earthquake monitoring frontend
-      operationId: getFrontend
-      responses:
-        "200":
-          description: Embedded HTML application
-          content:
-            text/html:
-              schema: {type: string}
-        "404": {$ref: "#/components/responses/Problem"}
   /health/live:
     get:
       summary: Check liveness

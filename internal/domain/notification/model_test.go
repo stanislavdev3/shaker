@@ -49,3 +49,19 @@ func TestAlertSeverity(t *testing.T) {
 		}
 	}
 }
+
+func TestTelegramSubscriptionValidation(t *testing.T) {
+	chatID := int64(42)
+	latitude, longitude, radius := 40.1, 74.2, 500.0
+	subscription := Subscription{
+		Name: "telegram:42", Channel: "telegram", TelegramChatID: &chatID,
+		CenterLatitude: &latitude, CenterLongitude: &longitude, RadiusKM: &radius,
+	}
+	if err := subscription.Validate(2000, true); err != nil {
+		t.Fatalf("valid Telegram subscription rejected: %v", err)
+	}
+	subscription.TelegramChatID = nil
+	if err := subscription.Validate(2000, true); err == nil {
+		t.Fatal("Telegram subscription without chat ID accepted")
+	}
+}

@@ -1,12 +1,31 @@
 # Architecture decisions and assumptions
 
-## USGS-only MVP
+## Production product phase
 
-USGS provides a stable realtime GeoJSON feed and a historical FDSN API with the normalized fields needed by the product. The application uses a provider interface so another source can be added without changing domain trigger rules or public API models.
+The service is no longer being designed as an MVP. New ingestion, correlation,
+notification, observability, recovery, and operational decisions must be suitable for
+a production system. Temporary shortcuts must be explicitly documented together with
+their removal criteria.
 
-## Cross-provider deduplication is deferred
+## EMSC is the low-latency source
 
-There is no dependable universal earthquake identity across providers. Time-and-distance heuristics can incorrectly merge nearby events or split revisions. The MVP maps each provider identity to one canonical record and does not infer cross-provider identity.
+The EMSC standing-order WebSocket is the primary source for low-latency earthquake
+alerts. EMSC FDSN is the recovery and catalogue channel for EMSC outages and missed
+WebSocket messages. USGS remains an independent realtime and historical source. A
+WebSocket observation is preliminary; an EMSC FDSN or USGS catalogue observation can
+confirm the canonical incident.
+
+## Cross-provider observations are associated with canonical incidents
+
+Provider records and every material provider revision remain independently stored.
+An earthquake incident is a separate canonical entity to which EMSC and USGS
+observations can be associated. Association uses explicit provider identifiers or an
+authoritative identity mapping first and a conservative, versioned heuristic only as
+a fallback. Heuristic links record their score, method, algorithm version, and audit
+history and can be corrected without deleting source data.
+
+False merges are more harmful than temporary duplicates. Ambiguous candidates are not
+automatically associated. See [event-correlation.md](event-correlation.md).
 
 ## PostgreSQL is the notification queue
 
@@ -37,5 +56,5 @@ Normalized columns support stable application queries while source records retai
 - The supplied PostGIS database has permission to install `postgis` and `pgcrypto`.
 - Compose applies the initial migration only when creating a new database volume; Atlas is the migration mechanism for existing environments.
 - Administrative authentication is a single deployment-level bearer key because user accounts and OAuth are explicit non-goals.
-- Realtime browser updates use PostgreSQL `LISTEN/NOTIFY` because notifications are emitted after transaction commit and require no additional broker. The WebSocket stream is best effort; the HTTP API remains authoritative.
+- Realtime client updates use PostgreSQL `LISTEN/NOTIFY` because notifications are emitted after transaction commit and require no additional broker. The WebSocket stream is best effort; the HTTP API remains authoritative.
 - Public notification WebSocket messages are deliberately content-free resynchronization hints. Protected delivery records are fetched separately with the administrative API key.

@@ -52,3 +52,19 @@ func TestValidateURLRejectsCredentialsAndScheme(t *testing.T) {
 		}
 	}
 }
+
+func TestTelegramMessage(t *testing.T) {
+	message, err := telegramMessage([]byte(`{
+		"type":"new_event",
+		"lifecycle":"preliminary",
+		"earthquake":{"magnitude":5.2,"depth_km":12.4,"distance_km":123.6,"place":"Test region","occurred_at":"2026-07-13T10:00:00Z","source_url":"https://example.com/event"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"🟡 Preliminary earthquake", "Magnitude: 5.2", "Distance: 124 km", "Depth: 12.4 km", "Test region"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("message %q does not contain %q", message, expected)
+		}
+	}
+}

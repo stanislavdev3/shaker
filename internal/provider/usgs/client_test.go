@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/provider"
 )
 
@@ -30,6 +31,9 @@ func TestParseFeedKeepsNullableFieldsAndRejectsIndividualFeature(t *testing.T) {
 	}
 	if e.DepthKM == nil || *e.DepthKM != 18.3 || e.Tsunami == nil || *e.Tsunami {
 		t.Fatalf("geometry/tsunami decoded incorrectly: %+v", e)
+	}
+	if e.SolutionClass != earthquake.ReviewedSolution {
+		t.Fatalf("solution class=%q, want reviewed", e.SolutionClass)
 	}
 }
 

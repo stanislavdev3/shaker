@@ -23,20 +23,12 @@ jobs:
       GOCACHE: /tmp/go-build
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json}
-      - run: npm ci
-        working-directory: web
-      - run: npm test
-        working-directory: web
-      - run: npm run build # embedded by the Go build below
-        working-directory: web
       - uses: actions/setup-go@v5
         with: {go-version: "1.26.2", cache: true}
       - run: test -z "$(gofmt -l cmd internal)"
       - run: go vet ./...
       - uses: golangci/golangci-lint-action@v8
-        with: {version: v2.1.6}
+        with: {version: v2.12.2}
       - run: go test -race ./...
       - run: go build ./cmd/earthquake-service
       - run: for migration in migrations/*.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done

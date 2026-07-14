@@ -1,5 +1,10 @@
 # Notifications
 
+The implemented channels are signed webhooks and Telegram Bot API messages. Telegram
+subscriptions are configured by sharing a location with the bot and entering a minimum
+magnitude. The current Telegram product radius is fixed at 1,000 km; see
+[telegram.md](telegram.md).
+
 ## Trigger and matching rules
 
 `new_event` applies only to an event first observed by normal realtime polling after baseline completion and within the subscription's maximum event age. Baseline, backfill, and recovery never create this trigger.
@@ -14,7 +19,7 @@ All configured magnitude, tsunami, alert, event-type, and geographic filters mus
 
 Ingestion inserts deliveries in the same transaction as the earthquake version. Workers claim bounded batches with `FOR UPDATE SKIP LOCKED`, commit, perform network I/O, and persist results in a second short operation. Any 2xx response succeeds. Failures use exponential backoff with jitter, capped at one hour, and become `dead` after ten attempts by default. Processing locks older than five minutes are reclaimable.
 
-Delivery is at least once. A receiver must persist and deduplicate `X-Earthquake-Delivery-ID`; duplicate HTTP requests are possible around failures. The database uniqueness key prevents duplicate jobs for one subscription, earthquake version, and trigger.
+Delivery is at least once. A webhook receiver must persist and deduplicate `X-Earthquake-Delivery-ID`; duplicate HTTP requests are possible around failures. Telegram API requests can likewise be repeated around ambiguous network failures. Telegram uses a durable per-subscription incident projection so edits to a known `message_id` converge on the newest desired canonical version. An ambiguous initial `sendMessage` can still produce a duplicate because Telegram provides no idempotency key. The database uniqueness key prevents duplicate jobs for one subscription, incident version, and trigger.
 
 ## Signature verification
 

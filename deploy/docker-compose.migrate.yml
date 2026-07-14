@@ -1,0 +1,20 @@
+services:
+  migrate:
+    image: ${ATLAS_IMAGE:-arigaio/atlas:1.2.3}
+    working_dir: /workspace
+    command:
+      - migrate
+      - apply
+      - --config
+      - file:///workspace/atlas.hcl
+      - --env
+      - production
+      - --baseline
+      - ${DEPLOY_MIGRATION_BASELINE:-202607130001}
+    environment:
+      DATABASE_URL: postgres://earthquake:${SHAKER_DB_PASSWORD:?Set SHAKER_DB_PASSWORD in .env}@postgres:5432/earthquake?sslmode=disable
+    volumes:
+      - ${SHAKER_REPOSITORY_DIR:?Set SHAKER_REPOSITORY_DIR}:/workspace:ro
+    networks:
+      - internal
+    restart: "no"

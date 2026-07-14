@@ -70,7 +70,6 @@ func New(repo *postgres.Repository, log *slog.Logger, c clock.Clock, m *observab
 			r.Post("/notification-deliveries/{id}/retry", s.retryDelivery)
 		})
 	})
-	r.Handle("/*", frontendHandler())
 	return otelhttp.NewHandler(r, "http.server")
 }
 
@@ -646,7 +645,11 @@ func writeSubscription(w http.ResponseWriter, status int, x domainnotification.S
 	writeJSON(w, status, map[string]any{"data": subscriptionView(x, secret)})
 }
 func subscriptionView(x domainnotification.Subscription, secret *string) map[string]any {
-	return map[string]any{"id": x.ID, "name": x.Name, "status": x.Status, "channel": x.Channel, "webhook_url": x.WebhookURL, "webhook_secret": secret, "minimum_magnitude": x.MinimumMagnitude, "maximum_magnitude": x.MaximumMagnitude, "center_latitude": x.CenterLatitude, "center_longitude": x.CenterLongitude, "radius_km": x.RadiusKM, "tsunami_only": x.TsunamiOnly, "allowed_alert_levels": x.AllowedAlertLevels, "allowed_event_types": x.AllowedEventTypes, "notify_on_new": x.NotifyOnNew, "notify_on_threshold_crossing": x.NotifyOnThresholdCrossing, "notify_on_tsunami_change": x.NotifyOnTsunamiChange, "notify_on_alert_increase": x.NotifyOnAlertIncrease, "maximum_event_age": x.MaximumEventAge.String(), "created_at": x.CreatedAt, "updated_at": x.UpdatedAt}
+	var webhookURL any
+	if x.Channel == "webhook" {
+		webhookURL = x.WebhookURL
+	}
+	return map[string]any{"id": x.ID, "name": x.Name, "status": x.Status, "channel": x.Channel, "subscription_kind": x.SubscriptionKind, "webhook_url": webhookURL, "webhook_secret": secret, "telegram_chat_id": x.TelegramChatID, "telegram_chat_username": x.TelegramChatUsername, "minimum_magnitude": x.MinimumMagnitude, "maximum_magnitude": x.MaximumMagnitude, "center_latitude": x.CenterLatitude, "center_longitude": x.CenterLongitude, "radius_km": x.RadiusKM, "tsunami_only": x.TsunamiOnly, "allowed_alert_levels": x.AllowedAlertLevels, "allowed_event_types": x.AllowedEventTypes, "notify_on_new": x.NotifyOnNew, "notify_on_threshold_crossing": x.NotifyOnThresholdCrossing, "notify_on_tsunami_change": x.NotifyOnTsunamiChange, "notify_on_alert_increase": x.NotifyOnAlertIncrease, "maximum_event_age": x.MaximumEventAge.String(), "created_at": x.CreatedAt, "updated_at": x.UpdatedAt}
 }
 
 type rateLimiter struct {

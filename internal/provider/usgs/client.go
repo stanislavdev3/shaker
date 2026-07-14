@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -56,6 +57,7 @@ func (c *Client) FetchRealtime(ctx context.Context, validators provider.CacheVal
 		return nil, meta, err
 	}
 	events, invalid, err := ParseFeed(body)
+	setObservationChannel(events, "usgs_realtime")
 	meta.InvalidCount = invalid
 	return events, meta, err
 }
@@ -86,12 +88,19 @@ func (c *Client) FetchHistorical(ctx context.Context, from, to time.Time, cursor
 		return nil, nil, provider.FetchMetadata{}, err
 	}
 	events, invalid, err := ParseFeed(body)
+	setObservationChannel(events, "usgs_fdsn")
 	var next *string
 	if len(events) == 20000 {
 		n := strconv.Itoa(offset + len(events))
 		next = &n
 	}
 	return events, next, provider.FetchMetadata{InvalidCount: invalid}, err
+}
+
+func setObservationChannel(events []earthquake.Event, channel string) {
+	for i := range events {
+		events[i].ObservationChannel = channel
+	}
 }
 
 func (c *Client) do(req *http.Request) ([]byte, http.Header, int, error) {
@@ -255,12 +264,22 @@ func parseFeature(raw json.RawMessage) (earthquake.Event, error) {
 		v := *f.Properties.Tsunami != 0
 		tsunami = &v
 	}
+	solutionClass := earthquake.ConfirmedSolution
+	if f.Properties.Status != nil {
+		switch strings.ToLower(*f.Properties.Status) {
+		case "reviewed":
+			solutionClass = earthquake.ReviewedSolution
+		case "deleted":
+			solutionClass = earthquake.RetractedSolution
+		}
+	}
 	e := earthquake.Event{Provider: "usgs", ExternalID: f.ID, OccurredAt: time.UnixMilli(*f.Properties.Time).UTC(),
 		SourceUpdatedAt: time.UnixMilli(*f.Properties.Updated).UTC(), Latitude: lat, Longitude: lon, DepthKM: depth,
 		Magnitude: f.Properties.Mag, MagnitudeType: f.Properties.MagType, Place: f.Properties.Place, Title: f.Properties.Title,
 		Status: f.Properties.Status, EventType: f.Properties.EventType, AlertLevel: f.Properties.Alert, Tsunami: tsunami,
 		Significance: f.Properties.Sig, FeltReports: f.Properties.Felt, CDI: f.Properties.CDI, MMI: f.Properties.MMI,
 		StationCount: f.Properties.NST, AzimuthalGap: f.Properties.Gap, MinimumDistance: f.Properties.DMin,
-		RMS: f.Properties.RMS, SourceURL: f.Properties.URL, DetailURL: f.Properties.Detail, RawPayload: append([]byte(nil), raw...)}
+		RMS: f.Properties.RMS, SourceURL: f.Properties.URL, DetailURL: f.Properties.Detail, RawPayload: append([]byte(nil), raw...),
+		SolutionClass: solutionClass}
 	return e, e.Validate()
 }

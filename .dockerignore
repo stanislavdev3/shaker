@@ -5,6 +5,4 @@
 /earthquake-service
 coverage.out
 runtime
-web/node_modules
-web/dist
 docs
