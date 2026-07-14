@@ -57,14 +57,18 @@ func TestTelegramMessage(t *testing.T) {
 	message, err := telegramMessage([]byte(`{
 		"type":"new_event",
 		"lifecycle":"preliminary",
-		"earthquake":{"magnitude":5.2,"depth_km":12.4,"distance_km":123.6,"place":"Test region","occurred_at":"2026-07-13T10:00:00Z","source_url":"https://example.com/event"}
+		"sources":{"usgs":"https://example.com/usgs"},
+		"earthquake":{"source":"emsc","magnitude":5.2,"depth_km":12.4,"distance_km":123.6,"latitude":42.8,"longitude":74.6,"place":"Test & region","occurred_at":"2026-07-13T10:00:00Z","detail_url":"https://example.com/emsc"}
 	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"🟡 Preliminary earthquake", "Magnitude: 5.2", "Distance: 124 km", "Depth: 12.4 km", "Test region"} {
-		if !strings.Contains(message, expected) {
-			t.Fatalf("message %q does not contain %q", message, expected)
+	for _, expected := range []string{"🟡 Preliminary earthquake", "Magnitude: <b>5.2</b>", "Distance: 124 km", "Depth: 12.4 km", "Test &amp; region", `<tg-time unix="1783936800" format="wDt">`, `<a href="https://example.com/usgs">USGS</a> | <a href="https://example.com/emsc">EMSC</a>`} {
+		if !strings.Contains(message.text, expected) {
+			t.Fatalf("message %q does not contain %q", message.text, expected)
 		}
+	}
+	if message.latitude == nil || message.longitude == nil || *message.latitude != 42.8 || *message.longitude != 74.6 {
+		t.Fatalf("coordinates=%v,%v", message.latitude, message.longitude)
 	}
 }

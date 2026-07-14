@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -33,8 +36,8 @@ type Worker struct {
 }
 
 type TelegramSender interface {
-	SendAlertMessage(context.Context, int64, string) (int64, error)
-	EditAlertMessage(context.Context, int64, int64, string) error
+	SendAlertMessage(context.Context, int64, string, *float64, *float64) (int64, error)
+	EditAlertMessage(context.Context, int64, int64, string, *float64, *float64) error
 }
 
 func NewWorker(repo *postgres.Repository, cipher *Cipher, c clock.Clock, log *slog.Logger, id, userAgent string, batch, maxAttempts int, lockTimeout, poll, httpTimeout time.Duration, maxResponse int64, allowPrivate bool, telegram TelegramSender) *Worker {
@@ -86,10 +89,14 @@ func (w *Worker) deliverTelegramAlert(ctx context.Context, alert postgres.Telegr
 	messageID := int64(0)
 	if err == nil {
 		if alert.TelegramMessageID == nil {
-			messageID, err = w.telegram.SendAlertMessage(ctx, alert.TelegramChatID, message)
+			messageID, err = w.telegram.SendAlertMessage(ctx, alert.TelegramChatID, message.text, message.latitude, message.longitude)
+			if err != nil && messageID > 0 {
+				w.log.Warn("send Telegram alert location", "telegram_alert_id", alert.ID, "error", err)
+				err = nil
+			}
 		} else {
 			messageID = *alert.TelegramMessageID
-			err = w.telegram.EditAlertMessage(ctx, alert.TelegramChatID, messageID, message)
+			err = w.telegram.EditAlertMessage(ctx, alert.TelegramChatID, messageID, message.text, message.latitude, message.longitude)
 		}
 	}
 	if err == nil {
@@ -144,7 +151,12 @@ func (w *Worker) send(ctx context.Context, d postgres.Delivery, now time.Time) (
 		if err != nil {
 			return nil, 0, err
 		}
-		_, err = w.telegram.SendAlertMessage(ctx, *d.TelegramChatID, message)
+		messageID, sendErr := w.telegram.SendAlertMessage(ctx, *d.TelegramChatID, message.text, message.latitude, message.longitude)
+		if sendErr != nil && messageID > 0 {
+			w.log.Warn("send Telegram delivery location", "delivery_id", d.ID, "error", sendErr)
+			return nil, 0, nil
+		}
+		err = sendErr
 		return nil, telegramRetryAfter(err), err
 	}
 	if d.Channel != "webhook" {
@@ -203,21 +215,31 @@ func (w *Worker) send(ctx context.Context, d postgres.Delivery, now time.Time) (
 	return &code, 0, nil
 }
 
-func telegramMessage(payload []byte) (string, error) {
+type formattedTelegramMessage struct {
+	text                string
+	latitude, longitude *float64
+}
+
+func telegramMessage(payload []byte) (formattedTelegramMessage, error) {
 	var delivery struct {
-		Type       string `json:"type"`
-		Lifecycle  string `json:"lifecycle"`
+		Type       string            `json:"type"`
+		Lifecycle  string            `json:"lifecycle"`
+		Sources    map[string]string `json:"sources"`
 		Earthquake struct {
+			Source     string    `json:"source"`
 			Magnitude  *float64  `json:"magnitude"`
 			DepthKM    *float64  `json:"depth_km"`
 			DistanceKM *float64  `json:"distance_km"`
+			Latitude   *float64  `json:"latitude"`
+			Longitude  *float64  `json:"longitude"`
 			Place      *string   `json:"place"`
 			OccurredAt time.Time `json:"occurred_at"`
 			SourceURL  *string   `json:"source_url"`
+			DetailURL  *string   `json:"detail_url"`
 		} `json:"earthquake"`
 	}
 	if err := json.Unmarshal(payload, &delivery); err != nil {
-		return "", fmt.Errorf("decode Telegram delivery: %w", err)
+		return formattedTelegramMessage{}, fmt.Errorf("decode Telegram delivery: %w", err)
 	}
 	title := map[string]string{
 		"new_event":                   "Earthquake detected",
@@ -240,7 +262,7 @@ func telegramMessage(payload []byte) (string, error) {
 	}
 	lines := []string{title}
 	if delivery.Earthquake.Magnitude != nil {
-		lines = append(lines, fmt.Sprintf("Magnitude: %.1f", *delivery.Earthquake.Magnitude))
+		lines = append(lines, fmt.Sprintf("Magnitude: <b>%.1f</b>", *delivery.Earthquake.Magnitude))
 	}
 	if delivery.Earthquake.DistanceKM != nil {
 		lines = append(lines, fmt.Sprintf("Distance: %.0f km", *delivery.Earthquake.DistanceKM))
@@ -249,15 +271,47 @@ func telegramMessage(payload []byte) (string, error) {
 		lines = append(lines, fmt.Sprintf("Depth: %.1f km", *delivery.Earthquake.DepthKM))
 	}
 	if delivery.Earthquake.Place != nil && *delivery.Earthquake.Place != "" {
-		lines = append(lines, "Location: "+*delivery.Earthquake.Place)
+		lines = append(lines, "Location: "+html.EscapeString(*delivery.Earthquake.Place))
 	}
 	if !delivery.Earthquake.OccurredAt.IsZero() {
-		lines = append(lines, "Time: "+delivery.Earthquake.OccurredAt.UTC().Format(time.RFC3339))
+		occurredAt := delivery.Earthquake.OccurredAt.UTC()
+		fallback := occurredAt.Format("2006-01-02 15:04 UTC")
+		lines = append(lines, fmt.Sprintf("Time: <tg-time unix=\"%d\" format=\"wDt\">%s</tg-time>", occurredAt.Unix(), fallback))
 	}
-	if delivery.Earthquake.SourceURL != nil && *delivery.Earthquake.SourceURL != "" {
-		lines = append(lines, "Details: "+*delivery.Earthquake.SourceURL)
+	detailsURL := delivery.Earthquake.SourceURL
+	if detailsURL == nil || *detailsURL == "" {
+		detailsURL = delivery.Earthquake.DetailURL
 	}
-	return strings.Join(lines, "\n"), nil
+	if detailsURL != nil && validTelegramURL(*detailsURL) && delivery.Sources[delivery.Earthquake.Source] == "" {
+		if delivery.Sources == nil {
+			delivery.Sources = map[string]string{}
+		}
+		delivery.Sources[delivery.Earthquake.Source] = *detailsURL
+	}
+	lines = append(lines, telegramSourceLabel("USGS", delivery.Sources["usgs"])+" | "+telegramSourceLabel("EMSC", delivery.Sources["emsc"]))
+	message := formattedTelegramMessage{text: strings.Join(lines, "\n")}
+	if validTelegramCoordinates(delivery.Earthquake.Latitude, delivery.Earthquake.Longitude) {
+		message.latitude = delivery.Earthquake.Latitude
+		message.longitude = delivery.Earthquake.Longitude
+	}
+	return message, nil
+}
+
+func telegramSourceLabel(label, link string) string {
+	if !validTelegramURL(link) {
+		return label
+	}
+	return "<a href=\"" + html.EscapeString(link) + "\">" + label + "</a>"
+}
+
+func validTelegramURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Host != "" && parsed.User == nil && (parsed.Scheme == "http" || parsed.Scheme == "https")
+}
+
+func validTelegramCoordinates(latitude, longitude *float64) bool {
+	return latitude != nil && longitude != nil && !math.IsNaN(*latitude) && !math.IsNaN(*longitude) &&
+		*latitude >= -90 && *latitude <= 90 && *longitude >= -180 && *longitude <= 180
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

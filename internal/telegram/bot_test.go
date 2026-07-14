@@ -56,7 +56,12 @@ func (s *fakeStore) DisableTelegramSubscription(context.Context, int64, time.Tim
 	return nil
 }
 
-type fakeAPI struct{ messages []string }
+type fakeAPI struct {
+	messages                   []string
+	answeredCallbackID         string
+	locationChatID, locationID int64
+	latitude, longitude        float64
+}
 
 func (a *fakeAPI) GetUpdates(context.Context, int64) ([]Update, error) {
 	return nil, errors.New("unused")
@@ -71,6 +76,15 @@ func (a *fakeAPI) SendMessageRemovingKeyboard(_ context.Context, _ int64, text s
 }
 func (a *fakeAPI) RequestLocation(_ context.Context, _ int64, text string) error {
 	a.messages = append(a.messages, text)
+	return nil
+}
+func (a *fakeAPI) AnswerCallbackQuery(_ context.Context, callbackID, _ string) error {
+	a.answeredCallbackID = callbackID
+	return nil
+}
+func (a *fakeAPI) SendLocation(_ context.Context, chatID, replyID int64, latitude, longitude float64) error {
+	a.locationChatID, a.locationID = chatID, replyID
+	a.latitude, a.longitude = latitude, longitude
 	return nil
 }
 
@@ -101,6 +115,21 @@ func TestRegistrationFlow(t *testing.T) {
 	}
 	if len(api.messages[1]) < len("remove:") || api.messages[1][:len("remove:")] != "remove:" {
 		t.Fatalf("location reply did not remove keyboard: %v", api.messages)
+	}
+}
+
+func TestLocationCallback(t *testing.T) {
+	api := &fakeAPI{}
+	bot := NewBot(&fakeStore{}, api, fixedClock{now: time.Now()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	update := Update{ID: 1, CallbackQuery: &CallbackQuery{
+		ID: "callback-1", Data: "loc:42.800000:74.600000",
+		Message: &Message{ID: 99, Chat: Chat{ID: 42, Type: "private"}},
+	}}
+	if err := bot.handle(context.Background(), update); err != nil {
+		t.Fatal(err)
+	}
+	if api.answeredCallbackID != "callback-1" || api.locationChatID != 42 || api.locationID != 99 || api.latitude != 42.8 || api.longitude != 74.6 {
+		t.Fatalf("unexpected callback result: %+v", api)
 	}
 }
 

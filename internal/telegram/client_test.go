@@ -14,15 +14,23 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 	var sentChatID int64
 	var keyboardRemoved bool
 	var editedMessageID int64
+	var alertParseMode string
+	var alertCallbackData string
+	var locationReplyID int64
+	var answeredCallbackID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/bottest/getUpdates":
 			_, _ = w.Write([]byte(`{"ok":true,"result":[{"update_id":7,"message":{"chat":{"id":42},"text":"4.5"}}]}`))
 		case "/bottest/sendMessage":
 			var request struct {
-				ChatID      int64 `json:"chat_id"`
+				ChatID      int64  `json:"chat_id"`
+				ParseMode   string `json:"parse_mode"`
 				ReplyMarkup struct {
 					RemoveKeyboard bool `json:"remove_keyboard"`
+					InlineKeyboard [][]struct {
+						CallbackData string `json:"callback_data"`
+					} `json:"inline_keyboard"`
 				} `json:"reply_markup"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -30,7 +38,36 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 			}
 			sentChatID = request.ChatID
 			keyboardRemoved = request.ReplyMarkup.RemoveKeyboard
+			if request.ParseMode != "" {
+				alertParseMode = request.ParseMode
+				alertCallbackData = request.ReplyMarkup.InlineKeyboard[0][0].CallbackData
+			}
 			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":99,"chat":{"id":42}}}`))
+		case "/bottest/sendLocation":
+			var request struct {
+				Latitude        float64 `json:"latitude"`
+				Longitude       float64 `json:"longitude"`
+				ReplyParameters struct {
+					MessageID int64 `json:"message_id"`
+				} `json:"reply_parameters"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Latitude != 42.8 || request.Longitude != 74.6 {
+				t.Errorf("location=%v,%v", request.Latitude, request.Longitude)
+			}
+			locationReplyID = request.ReplyParameters.MessageID
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":100}}`))
+		case "/bottest/answerCallbackQuery":
+			var request struct {
+				CallbackID string `json:"callback_query_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			answeredCallbackID = request.CallbackID
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 		case "/bottest/editMessageText":
 			var request struct {
 				MessageID int64 `json:"message_id"`
@@ -72,11 +109,24 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 	if !keyboardRemoved {
 		t.Fatal("remove_keyboard was not sent")
 	}
-	messageID, err := client.SendAlertMessage(context.Background(), 42, "alert")
+	latitude, longitude := 42.8, 74.6
+	messageID, err := client.SendAlertMessage(context.Background(), 42, "<b>alert</b>", &latitude, &longitude)
 	if err != nil || messageID != 99 {
 		t.Fatalf("messageID=%d err=%v", messageID, err)
 	}
-	if err := client.EditAlertMessage(context.Background(), 42, messageID, "updated"); err != nil {
+	if alertParseMode != "HTML" || alertCallbackData != "loc:42.800000:74.600000" {
+		t.Fatalf("parse mode=%q callback=%q", alertParseMode, alertCallbackData)
+	}
+	if err := client.AnswerCallbackQuery(context.Background(), "callback-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SendLocation(context.Background(), 42, messageID, latitude, longitude); err != nil {
+		t.Fatal(err)
+	}
+	if answeredCallbackID != "callback-1" || locationReplyID != messageID {
+		t.Fatalf("answered callback=%q location reply=%d", answeredCallbackID, locationReplyID)
+	}
+	if err := client.EditAlertMessage(context.Background(), 42, messageID, "updated", &latitude, &longitude); err != nil {
 		t.Fatal(err)
 	}
 	if editedMessageID != 99 {
@@ -96,6 +146,13 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 	}
 }
 
+func TestAlertLocationKeyboardIsPrivateOnly(t *testing.T) {
+	latitude, longitude := 42.8, 74.6
+	if alertLocationKeyboard(-10042, &latitude, &longitude) != nil {
+		t.Fatal("channel alert must not have a location button")
+	}
+}
+
 func TestClientPreservesTelegramRetryAfter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -103,7 +160,7 @@ func TestClientPreservesTelegramRetryAfter(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewClient(server.URL, "test", time.Second, 1024)
-	_, err := client.SendAlertMessage(context.Background(), 42, "alert")
+	_, err := client.SendAlertMessage(context.Background(), 42, "alert", nil, nil)
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.RetryAfter() != 17*time.Second {
 		t.Fatalf("error=%v", err)

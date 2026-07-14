@@ -1,0 +1,30 @@
+{
+  "type": "FeatureCollection",
+  "metadata": {"totalCount": 2},
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [74.71, 42.91, 12.0]},
+      "properties": {
+        "unid": "20260714_0000123",
+        "source_id": "1938472",
+        "source_catalog": "EMSC-RTS",
+        "time": "2026-07-14T07:11:12.4Z",
+        "lastupdate": "2026-07-14T07:13:02.0Z",
+        "lat": 42.91,
+        "lon": 74.71,
+        "depth": 12.0,
+        "mag": 4.6,
+        "magtype": "mb",
+        "evtype": "ke",
+        "auth": "EMSC",
+        "flynn_region": "KYRGYZSTAN"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [10.0, 20.0]},
+      "properties": {"unid": "missing-timestamps"}
+    }
+  ]
+}

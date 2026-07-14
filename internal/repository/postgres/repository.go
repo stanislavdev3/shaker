@@ -184,10 +184,11 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 			return earthquake.Change{}, err
 		}
 		err = tx.QueryRow(ctx, `INSERT INTO earthquake_source_records(id,earthquake_id,provider,external_id,source_updated_at,
-			payload_hash,raw_payload,version,first_seen_at,last_seen_at,created_at,updated_at,
+			payload_hash,raw_payload,source_url,detail_url,version,first_seen_at,last_seen_at,created_at,updated_at,
 			latest_observation_channel,solution_class)
-			VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,1,$7,$7,$7,$7,$8,$9) RETURNING id`,
-			incoming.ID, incoming.Provider, incoming.ExternalID, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, now,
+			VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,1,$9,$9,$9,$9,$10,$11) RETURNING id`,
+			incoming.ID, incoming.Provider, incoming.ExternalID, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload,
+			incoming.SourceURL, incoming.DetailURL, now,
 			channel, solution).Scan(&sourceID)
 		if err != nil {
 			return earthquake.Change{}, err
@@ -219,7 +220,9 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 			return earthquake.Change{}, err
 		}
 		promoted := earthquake.StrongerSolution(oldSolution, solution)
-		_, err = tx.Exec(ctx, `UPDATE earthquake_source_records SET solution_class=$2,last_seen_at=$3,updated_at=$3 WHERE id=$1`, sourceID, promoted, now)
+		_, err = tx.Exec(ctx, `UPDATE earthquake_source_records SET solution_class=$2,
+			source_url=COALESCE($3,source_url),detail_url=COALESCE($4,detail_url),last_seen_at=$5,updated_at=$5 WHERE id=$1`,
+			sourceID, promoted, incoming.SourceURL, incoming.DetailURL, now)
 		if err != nil {
 			return earthquake.Change{}, err
 		}
@@ -230,8 +233,26 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 			return earthquake.Change{}, err
 		}
 		promoted := earthquake.StrongerSolution(oldSolution, solution)
+		latestChannel := channel
+		if promoted != solution {
+			latestChannel = oldChannel
+		}
 		_, err = tx.Exec(ctx, `UPDATE earthquake_source_records SET latest_observation_channel=$2,solution_class=$3,
-			last_seen_at=$4,updated_at=$4 WHERE id=$1`, sourceID, channel, promoted, now)
+			source_url=COALESCE($4,source_url),detail_url=COALESCE($5,detail_url),last_seen_at=$6,updated_at=$6 WHERE id=$1`,
+			sourceID, latestChannel, promoted, incoming.SourceURL, incoming.DetailURL, now)
+		if err != nil {
+			return earthquake.Change{}, err
+		}
+		return applyLifecycleChange(ctx, tx, existing, sourceID, incoming, now, earthquake.Unchanged)
+	}
+	if solution != earthquake.RetractedSolution && oldSolution.Valid() &&
+		earthquake.StrongerSolution(oldSolution, solution) == oldSolution && solution != oldSolution {
+		if err := insertProviderObservation(ctx, tx, sourceID, sourceVersion, channel, solution, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, now); err != nil {
+			return earthquake.Change{}, err
+		}
+		_, err = tx.Exec(ctx, `UPDATE earthquake_source_records SET source_url=COALESCE($2,source_url),
+			detail_url=COALESCE($3,detail_url),last_seen_at=$4,updated_at=$4 WHERE id=$1`,
+			sourceID, incoming.SourceURL, incoming.DetailURL, now)
 		if err != nil {
 			return earthquake.Change{}, err
 		}
@@ -239,8 +260,10 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 	}
 	sourceVersion++
 	_, err = tx.Exec(ctx, `UPDATE earthquake_source_records SET source_updated_at=$2,payload_hash=$3,raw_payload=$4,
-		version=$5,latest_observation_channel=$6,solution_class=$7,last_seen_at=$8,updated_at=$8 WHERE id=$1`,
-		sourceID, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, sourceVersion, channel, solution, now)
+		source_url=COALESCE($5,source_url),detail_url=COALESCE($6,detail_url),version=$7,
+		latest_observation_channel=$8,solution_class=$9,last_seen_at=$10,updated_at=$10 WHERE id=$1`,
+		sourceID, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, incoming.SourceURL, incoming.DetailURL,
+		sourceVersion, channel, solution, now)
 	if err != nil {
 		return earthquake.Change{}, err
 	}
@@ -442,13 +465,17 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 		return err
 	}
 	rows.Close()
+	sourceLinks, err := providerSourceLinks(ctx, tx, change.Current.ID)
+	if err != nil {
+		return err
+	}
 	for _, item := range subscriptions {
 		s := item.subscription
 		current := change.Current
 		current.DistanceKM = item.distanceKM
 		for _, trigger := range notification.Triggers(s, change.Previous, change.Current, mode, now, baseline) {
 			deliveryID := uuid.New()
-			payload := notificationPayload(deliveryID, string(trigger), current, now)
+			payload := notificationPayload(deliveryID, string(trigger), current, sourceLinks, now)
 			if s.Channel == "telegram" {
 				if _, err := upsertTelegramAlertMessage(ctx, tx, s.ID, current.ID, current.Version,
 					string(current.Lifecycle), payload, now); err != nil {
@@ -495,10 +522,14 @@ func refreshTelegramAlertMessages(ctx context.Context, tx pgx.Tx, current earthq
 		return err
 	}
 	rows.Close()
+	sourceLinks, err := providerSourceLinks(ctx, tx, current.ID)
+	if err != nil {
+		return err
+	}
 	for _, alert := range alerts {
 		event := current
 		event.DistanceKM = alert.distanceKM
-		payload := notificationPayload(uuid.New(), "earthquake_update", event, now)
+		payload := notificationPayload(uuid.New(), "earthquake_update", event, sourceLinks, now)
 		if _, err := upsertTelegramAlertMessage(ctx, tx, alert.subscriptionID, current.ID, current.Version,
 			string(current.Lifecycle), payload, now); err != nil {
 			return err
@@ -507,7 +538,30 @@ func refreshTelegramAlertMessages(ctx context.Context, tx pgx.Tx, current earthq
 	return nil
 }
 
-func notificationPayload(deliveryID uuid.UUID, trigger string, event earthquake.Event, now time.Time) json.RawMessage {
+func providerSourceLinks(ctx context.Context, tx pgx.Tx, earthquakeID uuid.UUID) (map[string]string, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (source.provider) source.provider,
+		COALESCE(source.source_url,source.detail_url)
+		FROM earthquake_source_associations association
+		JOIN earthquake_source_records source ON source.id=association.source_record_id
+		WHERE association.earthquake_id=$1 AND association.active
+			AND COALESCE(source.source_url,source.detail_url) IS NOT NULL
+		ORDER BY source.provider,source.source_updated_at DESC`, earthquakeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	links := map[string]string{}
+	for rows.Next() {
+		var provider, link string
+		if err := rows.Scan(&provider, &link); err != nil {
+			return nil, err
+		}
+		links[provider] = link
+	}
+	return links, rows.Err()
+}
+
+func notificationPayload(deliveryID uuid.UUID, trigger string, event earthquake.Event, sourceLinks map[string]string, now time.Time) json.RawMessage {
 	lifecycle := event.Lifecycle
 	if lifecycle == "" {
 		lifecycle = earthquake.Confirmed
@@ -518,6 +572,7 @@ func notificationPayload(deliveryID uuid.UUID, trigger string, event earthquake.
 		"lifecycle":   lifecycle,
 		"created_at":  now,
 		"earthquake":  event,
+		"sources":     sourceLinks,
 	})
 	return payload
 }

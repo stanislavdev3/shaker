@@ -35,7 +35,14 @@ func (e *APIError) Error() string {
 func (e *APIError) RetryAfter() time.Duration { return e.RetryDelay }
 
 type Update struct {
-	ID      int64    `json:"update_id"`
+	ID            int64          `json:"update_id"`
+	Message       *Message       `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"`
+}
+
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	Data    string   `json:"data"`
 	Message *Message `json:"message"`
 }
 
@@ -83,7 +90,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 	err := c.call(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         int(c.pollLimit.Seconds()),
-		"allowed_updates": []string{"message"},
+		"allowed_updates": []string{"message", "callback_query"},
 	}, &response)
 	return response.Result, err
 }
@@ -92,11 +99,18 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 	return c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, nil)
 }
 
-func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string) (int64, error) {
+func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string, latitude, longitude *float64) (int64, error) {
 	var response struct {
 		Result Message `json:"result"`
 	}
-	err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, &response)
+	request := map[string]any{
+		"chat_id": chatID, "text": text, "parse_mode": "HTML",
+		"link_preview_options": map[string]any{"is_disabled": true},
+	}
+	if keyboard := alertLocationKeyboard(chatID, latitude, longitude); keyboard != nil {
+		request["reply_markup"] = keyboard
+	}
+	err := c.call(ctx, "sendMessage", request, &response)
 	if err != nil {
 		return 0, err
 	}
@@ -106,10 +120,39 @@ func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string
 	return response.Result.ID, nil
 }
 
-func (c *Client) EditAlertMessage(ctx context.Context, chatID, messageID int64, text string) error {
-	err := c.call(ctx, "editMessageText", map[string]any{
-		"chat_id": chatID, "message_id": messageID, "text": text,
+func alertLocationKeyboard(chatID int64, latitude, longitude *float64) any {
+	if chatID <= 0 || latitude == nil || longitude == nil {
+		return nil
+	}
+	return map[string]any{"inline_keyboard": [][]map[string]any{{{
+		"text": "🗺 Show location", "callback_data": fmt.Sprintf("loc:%.6f:%.6f", *latitude, *longitude),
+	}}}}
+}
+
+func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID, text string) error {
+	request := map[string]any{"callback_query_id": callbackID}
+	if text != "" {
+		request["text"] = text
+	}
+	return c.call(ctx, "answerCallbackQuery", request, nil)
+}
+
+func (c *Client) SendLocation(ctx context.Context, chatID, replyToMessageID int64, latitude, longitude float64) error {
+	return c.call(ctx, "sendLocation", map[string]any{
+		"chat_id": chatID, "latitude": latitude, "longitude": longitude,
+		"reply_parameters": map[string]any{"message_id": replyToMessageID, "allow_sending_without_reply": true},
 	}, nil)
+}
+
+func (c *Client) EditAlertMessage(ctx context.Context, chatID, messageID int64, text string, latitude, longitude *float64) error {
+	request := map[string]any{
+		"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML",
+		"link_preview_options": map[string]any{"is_disabled": true},
+	}
+	if keyboard := alertLocationKeyboard(chatID, latitude, longitude); keyboard != nil {
+		request["reply_markup"] = keyboard
+	}
+	err := c.call(ctx, "editMessageText", request, nil)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
 		return nil
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/example/earthquake-service/internal/clock"
 	"github.com/example/earthquake-service/internal/config"
@@ -23,6 +24,7 @@ import (
 	"github.com/example/earthquake-service/internal/ingestion"
 	"github.com/example/earthquake-service/internal/notification"
 	"github.com/example/earthquake-service/internal/observability"
+	"github.com/example/earthquake-service/internal/provider/emsc"
 	"github.com/example/earthquake-service/internal/provider/usgs"
 	"github.com/example/earthquake-service/internal/realtime"
 	"github.com/example/earthquake-service/internal/repository/postgres"
@@ -62,8 +64,16 @@ func main() {
 		fatal("initialize secrets cipher", err)
 	}
 	userAgent := "earthquake-service/" + cfg.Version
-	provider := usgs.New(cfg.USGSRealtimeURL, cfg.USGSFDSNURL, userAgent, cfg.USGSHTTPTimeout, cfg.USGSMaxResponseBytes)
-	ingestionService := ingestion.New(provider, repo, clock.Real{}, log)
+	usgsProvider := usgs.New(cfg.USGSRealtimeURL, cfg.USGSFDSNURL, userAgent, cfg.USGSHTTPTimeout, cfg.USGSMaxResponseBytes)
+	usgsIngestion := ingestion.New(usgsProvider, repo, clock.Real{}, log)
+	var emscIngestion *ingestion.Service
+	var emscStream *emsc.Stream
+	if cfg.EMSCEnabled && (cfg.Role == "worker" || cfg.Role == "all") {
+		emscMetrics := observability.NewEMSCWebSocketMetrics(prometheus.DefaultRegisterer)
+		emscProvider := emsc.NewFDSN(cfg.EMSCFDSNURL, userAgent, clock.Real{}, cfg.EMSCHTTPTimeout, cfg.EMSCLookback, cfg.EMSCMaxResponseBytes)
+		emscIngestion = ingestion.New(emscProvider, repo, clock.Real{}, log)
+		emscStream = emsc.NewStream(cfg.EMSCWebSocketURL, userAgent, cfg.EMSCHTTPTimeout, cfg.EMSCPingInterval, cfg.EMSCMaxFrameBytes, log, emscMetrics)
+	}
 	var telegramClient *telegram.Client
 	if (cfg.Role == "worker" || cfg.Role == "all") && cfg.TelegramBotToken != "" {
 		telegramClient = telegram.NewClient(cfg.TelegramAPIURL, cfg.TelegramBotToken, cfg.TelegramPollTimeout, cfg.TelegramMaxResponseBytes)
@@ -80,12 +90,12 @@ func main() {
 	case "api":
 		err = runAPI(ctx, cfg, repo, cipher, log)
 	case "worker":
-		runWorker(ctx, cfg, ingestionService, repo, cipher, userAgent, telegramClient, log)
+		runWorker(ctx, cfg, usgsIngestion, emscIngestion, emscStream, repo, cipher, userAgent, telegramClient, log)
 	case "all":
-		go runWorker(ctx, cfg, ingestionService, repo, cipher, userAgent, telegramClient, log)
+		go runWorker(ctx, cfg, usgsIngestion, emscIngestion, emscStream, repo, cipher, userAgent, telegramClient, log)
 		err = runAPI(ctx, cfg, repo, cipher, log)
 	case "backfill":
-		err = runBackfill(ctx, cfg, ingestionService, os.Args[2:])
+		err = runBackfill(ctx, cfg, usgsIngestion, os.Args[2:])
 	default:
 		err = fmt.Errorf("unsupported role %q", cfg.Role)
 	}
@@ -136,13 +146,30 @@ func runAPI(ctx context.Context, cfg config.Config, repo *postgres.Repository, c
 	}
 }
 
-func runWorker(ctx context.Context, cfg config.Config, ingestionService *ingestion.Service, repo *postgres.Repository, cipher *notification.Cipher, userAgent string, telegramClient *telegram.Client, log *slog.Logger) {
-	if from, to, err := ingestionService.RecoveryRange(ctx, cfg.RecoveryOverlapDuration); err != nil {
+func runWorker(ctx context.Context, cfg config.Config, usgsIngestion, emscIngestion *ingestion.Service, emscStream *emsc.Stream,
+	repo *postgres.Repository, cipher *notification.Cipher, userAgent string, telegramClient *telegram.Client, log *slog.Logger,
+) {
+	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
+		log.Error("start worker metrics server", "error", err)
+	}
+	if from, to, err := usgsIngestion.RecoveryRange(ctx, cfg.RecoveryOverlapDuration); err != nil {
 		log.Error("calculate recovery range", "error", err)
 	} else if from != nil && to != nil {
-		if err := ingestionService.RunBackfill(ctx, *from, *to, cfg.BackfillChunkDuration, "recovery"); err != nil {
+		if err := usgsIngestion.RunBackfill(ctx, *from, *to, cfg.BackfillChunkDuration, "recovery"); err != nil {
 			log.Error("recovery backfill failed", "from", from, "to", to, "error", err)
 		}
+	}
+	if emscIngestion != nil {
+		if from, to, err := emscIngestion.RecoveryRange(ctx, cfg.RecoveryOverlapDuration); err != nil {
+			log.Error("calculate EMSC recovery range", "error", err)
+		} else if from != nil && to != nil {
+			if err := emscIngestion.RunBackfill(ctx, *from, *to, cfg.BackfillChunkDuration, "recovery"); err != nil {
+				log.Error("EMSC recovery backfill failed", "from", from, "to", to, "error", err)
+			}
+		}
+		go emscIngestion.Run(ctx, cfg.EMSCPollInterval)
+		go emscStream.Run(ctx, emscIngestion.ApplyRealtime)
+		log.Info("EMSC FDSN and WebSocket ingestion enabled")
 	}
 
 	workerID := "earthquake-service-" + uuid.NewString()
@@ -167,7 +194,34 @@ func runWorker(ctx context.Context, cfg config.Config, ingestionService *ingesti
 		telegramClient,
 	)
 	go deliveryWorker.Run(ctx)
-	ingestionService.Run(ctx, cfg.USGSPollInterval)
+	usgsIngestion.Run(ctx, cfg.USGSPollInterval)
+}
+
+func startWorkerMetrics(ctx context.Context, address string, log *slog.Logger) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{
+		Handler:           promhttp.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Warn("shut down worker metrics server", "error", err)
+		}
+	}()
+	go func() {
+		log.Info("worker metrics server started", "address", address)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("serve worker metrics", "error", err)
+		}
+	}()
+	return nil
 }
 
 func runBackfill(ctx context.Context, cfg config.Config, service *ingestion.Service, args []string) error {

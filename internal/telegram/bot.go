@@ -35,6 +35,8 @@ type BotAPI interface {
 	SendMessage(context.Context, int64, string) error
 	SendMessageRemovingKeyboard(context.Context, int64, string) error
 	RequestLocation(context.Context, int64, string) error
+	AnswerCallbackQuery(context.Context, string, string) error
+	SendLocation(context.Context, int64, int64, float64, float64) error
 }
 
 type Bot struct {
@@ -100,6 +102,9 @@ func (b *Bot) poll(ctx context.Context) {
 }
 
 func (b *Bot) handle(ctx context.Context, update Update) error {
+	if update.CallbackQuery != nil {
+		return b.handleCallbackQuery(ctx, *update.CallbackQuery)
+	}
 	if update.Message == nil || update.Message.Chat.ID == 0 {
 		return nil
 	}
@@ -168,6 +173,25 @@ func (b *Bot) handle(ctx context.Context, update Update) error {
 		return err
 	}
 	return b.api.SendMessage(ctx, chatID, fmt.Sprintf("Alerts enabled: magnitude %.1f and above within 1000 km. Use /status to check or /stop to disable.", magnitude))
+}
+
+func (b *Bot) handleCallbackQuery(ctx context.Context, query CallbackQuery) error {
+	if query.Message == nil || query.Message.Chat.ID <= 0 || query.Message.ID <= 0 {
+		return b.api.AnswerCallbackQuery(ctx, query.ID, "Location is available only in a private chat.")
+	}
+	parts := strings.Split(query.Data, ":")
+	if len(parts) != 3 || parts[0] != "loc" {
+		return b.api.AnswerCallbackQuery(ctx, query.ID, "Location is unavailable.")
+	}
+	latitude, latitudeErr := strconv.ParseFloat(parts[1], 64)
+	longitude, longitudeErr := strconv.ParseFloat(parts[2], 64)
+	if latitudeErr != nil || longitudeErr != nil || !validLocation(Location{Latitude: latitude, Longitude: longitude}) {
+		return b.api.AnswerCallbackQuery(ctx, query.ID, "Location is unavailable.")
+	}
+	if err := b.api.AnswerCallbackQuery(ctx, query.ID, ""); err != nil {
+		return err
+	}
+	return b.api.SendLocation(ctx, query.Message.Chat.ID, query.Message.ID, latitude, longitude)
 }
 
 func validLocation(location Location) bool {

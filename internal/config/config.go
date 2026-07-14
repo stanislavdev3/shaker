@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -11,34 +12,41 @@ import (
 )
 
 type Config struct {
-	Environment, Version, Role, HTTPAddress, DatabaseURL    string
-	DatabaseMaxConnections, DatabaseMinConnections          int
-	USGSRealtimeURL, USGSFDSNURL                            string
-	USGSPollInterval, USGSHTTPTimeout                       time.Duration
-	USGSMaxResponseBytes                                    int64
-	BackfillChunkDuration, RecoveryOverlapDuration          time.Duration
-	NotificationBatchSize, NotificationMaxAttempts          int
-	NotificationLockTimeout, NotificationPollInterval       time.Duration
-	AdminAPIKey                                             string
-	EncryptionKey                                           []byte
-	WebhookAllowPrivate                                     bool
-	WebhookHTTPTimeout                                      time.Duration
-	WebhookMaxResponseBytes                                 int64
-	TelegramBotToken, TelegramAPIURL, TelegramGlobalChannel string
-	TelegramPollTimeout                                     time.Duration
-	TelegramMaxResponseBytes                                int64
-	LogLevel, OTELEndpoint                                  string
-	MaxSearchRadiusKM                                       float64
-	CursorHMACKey                                           []byte
+	Environment, Version, Role, HTTPAddress, MetricsAddress, DatabaseURL string
+	DatabaseMaxConnections, DatabaseMinConnections                       int
+	USGSRealtimeURL, USGSFDSNURL                                         string
+	USGSPollInterval, USGSHTTPTimeout                                    time.Duration
+	USGSMaxResponseBytes                                                 int64
+	EMSCEnabled                                                          bool
+	EMSCWebSocketURL, EMSCFDSNURL                                        string
+	EMSCPollInterval, EMSCHTTPTimeout, EMSCLookback                      time.Duration
+	EMSCPingInterval                                                     time.Duration
+	EMSCMaxResponseBytes, EMSCMaxFrameBytes                              int64
+	BackfillChunkDuration, RecoveryOverlapDuration                       time.Duration
+	NotificationBatchSize, NotificationMaxAttempts                       int
+	NotificationLockTimeout, NotificationPollInterval                    time.Duration
+	AdminAPIKey                                                          string
+	EncryptionKey                                                        []byte
+	WebhookAllowPrivate                                                  bool
+	WebhookHTTPTimeout                                                   time.Duration
+	WebhookMaxResponseBytes                                              int64
+	TelegramBotToken, TelegramAPIURL, TelegramGlobalChannel              string
+	TelegramPollTimeout                                                  time.Duration
+	TelegramMaxResponseBytes                                             int64
+	LogLevel, OTELEndpoint                                               string
+	MaxSearchRadiusKM                                                    float64
+	CursorHMACKey                                                        []byte
 }
 
 func Load(roleOverride string) (Config, error) {
 	c := Config{
 		Environment: env("APP_ENV", "development"), Version: env("APP_VERSION", "dev"),
-		Role: env("APP_ROLE", "all"), HTTPAddress: env("HTTP_ADDRESS", ":8080"),
+		Role: env("APP_ROLE", "all"), HTTPAddress: env("HTTP_ADDRESS", ":8080"), MetricsAddress: env("WORKER_METRICS_ADDRESS", ":9090"),
 		DatabaseURL: os.Getenv("DATABASE_URL"), USGSRealtimeURL: env("USGS_REALTIME_URL", "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"),
-		USGSFDSNURL: env("USGS_FDSN_URL", "https://earthquake.usgs.gov/fdsnws/event/1/query"),
-		AdminAPIKey: os.Getenv("ADMIN_API_KEY"), LogLevel: env("LOG_LEVEL", "info"), OTELEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		USGSFDSNURL:      env("USGS_FDSN_URL", "https://earthquake.usgs.gov/fdsnws/event/1/query"),
+		EMSCWebSocketURL: env("EMSC_WEBSOCKET_URL", "wss://www.seismicportal.eu/standing_order/websocket"),
+		EMSCFDSNURL:      env("EMSC_FDSN_URL", "https://www.seismicportal.eu/fdsnws/event/1/query"),
+		AdminAPIKey:      os.Getenv("ADMIN_API_KEY"), LogLevel: env("LOG_LEVEL", "info"), OTELEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"), TelegramAPIURL: env("TELEGRAM_API_URL", "https://api.telegram.org"),
 		TelegramGlobalChannel: os.Getenv("TELEGRAM_GLOBAL_CHANNEL"),
 	}
@@ -63,6 +71,34 @@ func Load(roleOverride string) (Config, error) {
 		return c, err
 	}
 	c.USGSMaxResponseBytes, err = int64Env("USGS_MAX_RESPONSE_BYTES", 25<<20)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCEnabled, err = boolEnv("EMSC_ENABLED", false)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCPollInterval, err = durationEnv("EMSC_POLL_INTERVAL", 30*time.Second)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCHTTPTimeout, err = durationEnv("EMSC_HTTP_TIMEOUT", 20*time.Second)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCLookback, err = durationEnv("EMSC_LOOKBACK_DURATION", 2*time.Hour)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCPingInterval, err = durationEnv("EMSC_PING_INTERVAL", 15*time.Second)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCMaxResponseBytes, err = int64Env("EMSC_MAX_RESPONSE_BYTES", 25<<20)
+	if err != nil {
+		return c, err
+	}
+	c.EMSCMaxFrameBytes, err = int64Env("EMSC_MAX_FRAME_BYTES", 256<<10)
 	if err != nil {
 		return c, err
 	}
@@ -137,7 +173,28 @@ func Load(roleOverride string) (Config, error) {
 	if c.TelegramGlobalChannel != "" && (!strings.HasPrefix(c.TelegramGlobalChannel, "@") || len(c.TelegramGlobalChannel) > 64 || strings.ContainsAny(c.TelegramGlobalChannel, " \t\r\n")) {
 		return c, errors.New("TELEGRAM_GLOBAL_CHANNEL must be a channel username starting with @")
 	}
+	if c.EMSCEnabled {
+		if err := validateEndpoint("EMSC_WEBSOCKET_URL", c.EMSCWebSocketURL, "ws", "wss"); err != nil {
+			return c, err
+		}
+		if err := validateEndpoint("EMSC_FDSN_URL", c.EMSCFDSNURL, "http", "https"); err != nil {
+			return c, err
+		}
+	}
 	return c, nil
+}
+
+func validateEndpoint(name, value string, schemes ...string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("%s must be an absolute URL", name)
+	}
+	for _, scheme := range schemes {
+		if parsed.Scheme == scheme {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s has unsupported URL scheme %q", name, parsed.Scheme)
 }
 
 func env(k, fallback string) string {

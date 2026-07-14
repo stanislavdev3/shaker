@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/example/earthquake-service/internal/clock"
+	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/provider"
 	"github.com/example/earthquake-service/internal/repository/postgres"
 )
@@ -28,6 +29,32 @@ type Service struct {
 
 func New(p provider.Provider, repo *postgres.Repository, c clock.Clock, log *slog.Logger) *Service {
 	return &Service{provider: p, repo: repo, clock: c, log: log, batchSize: 250}
+}
+
+// ApplyRealtime persists one push observation. Push streams do not replay a
+// catalogue snapshot, so a newly received event is always eligible for alerts.
+func (s *Service) ApplyRealtime(ctx context.Context, event earthquake.Event) error {
+	now := s.clock.Now()
+	runID, err := s.repo.StartRun(ctx, s.provider.Name(), "realtime", now)
+	if err != nil {
+		return err
+	}
+	stats, applyErr := s.repo.ApplyBatch(ctx, []earthquake.Event{event}, "realtime", true, now)
+	if applyErr == nil {
+		applyErr = s.repo.SetState(ctx, s.provider.Name(), stateCheckpoint, now.Format(time.RFC3339Nano), now)
+	}
+	status := "succeeded"
+	if applyErr != nil {
+		status = "failed"
+	}
+	metadata := map[string]any{"channel": event.EffectiveObservationChannel(), "external_id": event.ExternalID}
+	if finishErr := s.repo.FinishRun(context.WithoutCancel(ctx), runID, status, stats, metadata, applyErr, s.clock.Now()); finishErr != nil {
+		s.log.Error("finish push ingestion run", "error", finishErr, "ingestion_run_id", runID)
+		if applyErr == nil {
+			return finishErr
+		}
+	}
+	return applyErr
 }
 
 func (s *Service) Poll(ctx context.Context) error {

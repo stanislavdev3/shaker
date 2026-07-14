@@ -15,6 +15,12 @@ connected to the message projection: the initial send persists `message_id`, and
 canonical versions converge through `editMessageText` for private alerts and the
 configured global channel.
 
+EMSC standing-order WebSocket and FDSN adapters are now implemented. They share the
+authoritative EMSC `unid`, so an FDSN observation confirms and updates the preliminary
+incident produced by the WebSocket. Cross-provider EMSC-to-USGS heuristic association
+is still intentionally disabled pending replay calibration. See `docs/emsc.md` for the
+runtime and rollout controls.
+
 ## Data model
 
 The production model separates facts received from providers from the product entity

@@ -69,6 +69,13 @@ All configuration is supplied via environment variables. See [.env.example](.env
 
 The worker polls USGS every 60 seconds by default. Its first successful poll against an empty provider state is a baseline and suppresses notifications. Conditional request validators and checkpoints survive restarts.
 
+Set `EMSC_ENABLED=true` on worker roles to enable the EMSC standing-order
+WebSocket for preliminary low-latency alerts and the EMSC FDSN catalogue for
+confirmation and overlapping recovery. Both channels share the EMSC `unid`, so
+confirmation edits the original Telegram message. See
+[`docs/emsc.md`](docs/emsc.md) for rollout controls and the current
+cross-provider correlation boundary.
+
 Set `TELEGRAM_BOT_TOKEN` to enable the Telegram bot in the worker. Users send `/start`, share their location, and enter a minimum magnitude to receive alerts within a fixed 1,000 km radius. See [docs/telegram.md](docs/telegram.md).
 
 Set `TELEGRAM_GLOBAL_CHANNEL=@eqmonitor` to publish all normalized earthquake incidents

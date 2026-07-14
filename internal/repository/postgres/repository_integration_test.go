@@ -129,6 +129,48 @@ func TestStaleCatalogueObservationConfirmsWithoutReplacingNewerParameters(t *tes
 		t.Fatalf("observations=%d", observations)
 	}
 }
+
+func TestNewerPreliminaryObservationDoesNotReplaceConfirmedCatalogueParameters(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	confirmed := testEvent("emsc-channel-priority", now, 5.1)
+	confirmed.Provider = "emsc"
+	confirmed.ObservationChannel = "emsc_fdsn"
+	confirmed.SolutionClass = earthquake.ConfirmedSolution
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{confirmed}, "backfill", true, now); err != nil {
+		t.Fatal(err)
+	}
+
+	preliminary := testEvent("emsc-channel-priority", now.Add(time.Minute), 6.8)
+	preliminary.Provider = "emsc"
+	preliminary.ObservationChannel = "emsc_standing_order"
+	preliminary.SolutionClass = earthquake.PreliminarySolution
+	stats, err := r.ApplyBatch(ctx, []earthquake.Event{preliminary}, "realtime", true, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Unchanged != 1 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	var magnitude float64
+	var lifecycle, channel string
+	if err := r.Pool.QueryRow(ctx, `SELECT e.magnitude,e.lifecycle,s.latest_observation_channel
+		FROM earthquakes e JOIN earthquake_source_records s ON s.earthquake_id=e.id
+		WHERE e.preferred_external_id=$1`, confirmed.ExternalID).Scan(&magnitude, &lifecycle, &channel); err != nil {
+		t.Fatal(err)
+	}
+	if magnitude != 5.1 || lifecycle != "confirmed" || channel != "emsc_fdsn" {
+		t.Fatalf("magnitude=%v lifecycle=%q channel=%q", magnitude, lifecycle, channel)
+	}
+	var observations int
+	if err := r.Pool.QueryRow(ctx, `SELECT count(*) FROM provider_observations`).Scan(&observations); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 2 {
+		t.Fatalf("observations=%d", observations)
+	}
+}
 func TestConcurrentUpsertSingleRecord(t *testing.T) {
 	r := integrationRepository(t)
 	ctx := context.Background()
@@ -263,7 +305,10 @@ func TestTelegramSubscriptionCreatesDistanceAwareDelivery(t *testing.T) {
 	if _, err := r.ActivateTelegramSubscription(ctx, chatID, 4.5, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.ApplyBatch(ctx, []earthquake.Event{testEvent("telegram-notify", now, 5.2)}, "realtime", true, now); err != nil {
+	event := testEvent("telegram-notify", now, 5.2)
+	sourceURL := "https://earthquake.usgs.gov/earthquakes/eventpage/telegram-notify"
+	event.SourceURL = &sourceURL
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "realtime", true, now); err != nil {
 		t.Fatal(err)
 	}
 	jobs, err := r.ClaimTelegramAlertMessages(ctx, "telegram-worker", 10, 5*time.Minute, now)
@@ -277,6 +322,7 @@ func TestTelegramSubscriptionCreatesDistanceAwareDelivery(t *testing.T) {
 		t.Fatalf("unexpected delivery: %+v", jobs[0])
 	}
 	var payload struct {
+		Sources    map[string]string `json:"sources"`
 		Earthquake struct {
 			DistanceKM *float64 `json:"distance_km"`
 		} `json:"earthquake"`
@@ -286,6 +332,9 @@ func TestTelegramSubscriptionCreatesDistanceAwareDelivery(t *testing.T) {
 	}
 	if payload.Earthquake.DistanceKM == nil || *payload.Earthquake.DistanceKM > 0.01 {
 		t.Fatalf("distance=%v", payload.Earthquake.DistanceKM)
+	}
+	if payload.Sources["usgs"] != sourceURL {
+		t.Fatalf("sources=%v", payload.Sources)
 	}
 }
 
