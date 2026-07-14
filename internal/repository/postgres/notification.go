@@ -53,7 +53,7 @@ const subscriptionSelect = `SELECT id,name,status,channel,webhook_url,encrypted_
 	maximum_magnitude,center_latitude,center_longitude,radius_km,tsunami_only,allowed_alert_levels,allowed_event_types,
 	notify_on_new,notify_on_threshold_crossing,notify_on_tsunami_change,notify_on_alert_increase,
 	EXTRACT(EPOCH FROM maximum_event_age)::bigint,telegram_chat_id,created_at,updated_at,
-	subscription_kind,telegram_chat_username FROM notification_subscriptions`
+	subscription_kind,telegram_chat_username,notification_language,minimum_intensity FROM notification_subscriptions`
 
 type scanner interface{ Scan(...any) error }
 
@@ -65,7 +65,8 @@ func scanSubscription(row scanner) (notification.Subscription, error) {
 	err := row.Scan(&s.ID, &s.Name, &s.Status, &s.Channel, &webhookURL, &encryptedSecret,
 		&s.MinimumMagnitude, &s.MaximumMagnitude, &s.CenterLatitude, &s.CenterLongitude, &s.RadiusKM, &s.TsunamiOnly, &s.AllowedAlertLevels,
 		&s.AllowedEventTypes, &s.NotifyOnNew, &s.NotifyOnThresholdCrossing, &s.NotifyOnTsunamiChange, &s.NotifyOnAlertIncrease,
-		&seconds, &s.TelegramChatID, &s.CreatedAt, &s.UpdatedAt, &s.SubscriptionKind, &s.TelegramChatUsername)
+		&seconds, &s.TelegramChatID, &s.CreatedAt, &s.UpdatedAt, &s.SubscriptionKind, &s.TelegramChatUsername,
+		&s.NotificationLanguage, &s.MinimumIntensity)
 	if webhookURL != nil {
 		s.WebhookURL = *webhookURL
 	}
@@ -77,17 +78,48 @@ func scanSubscription(row scanner) (notification.Subscription, error) {
 func (r *Repository) UpsertTelegramLocation(ctx context.Context, chatID int64, latitude, longitude, radiusKM float64, now time.Time) (notification.Subscription, error) {
 	name := fmt.Sprintf("telegram:%d", chatID)
 	_, err := r.Pool.Exec(ctx, `INSERT INTO notification_subscriptions(
-		id,name,status,channel,telegram_chat_id,minimum_magnitude,center_latitude,center_longitude,radius_km,area,
+		id,name,status,channel,telegram_chat_id,minimum_magnitude,minimum_intensity,notification_language,
+		center_latitude,center_longitude,radius_km,area,
 		tsunami_only,notify_on_new,notify_on_threshold_crossing,notify_on_tsunami_change,notify_on_alert_increase,
 		maximum_event_age,created_at,updated_at)
-		VALUES(gen_random_uuid(),$1,'paused','telegram',$2,NULL,$3,$4,$5,
+		VALUES(gen_random_uuid(),$1,'paused','telegram',$2,NULL,NULL,NULL,$3,$4,NULLIF($5,0),
 			ST_SetSRID(ST_MakePoint($4,$3),4326)::geography,FALSE,TRUE,TRUE,FALSE,FALSE,'2 hours',$6,$6)
 		ON CONFLICT (telegram_chat_id) WHERE channel='telegram' DO UPDATE SET
-			status='paused',minimum_magnitude=NULL,center_latitude=EXCLUDED.center_latitude,
+			status='paused',minimum_magnitude=NULL,minimum_intensity=NULL,notification_language=NULL,
+			center_latitude=EXCLUDED.center_latitude,
 			center_longitude=EXCLUDED.center_longitude,radius_km=EXCLUDED.radius_km,area=EXCLUDED.area,updated_at=EXCLUDED.updated_at`,
 		name, chatID, latitude, longitude, radiusKM, now)
 	if err != nil {
 		return notification.Subscription{}, err
+	}
+	return r.GetTelegramSubscription(ctx, chatID)
+}
+
+func (r *Repository) SetTelegramLanguage(ctx context.Context, chatID int64, language string, now time.Time) (notification.Subscription, error) {
+	tag, err := r.Pool.Exec(ctx, `UPDATE notification_subscriptions SET notification_language=$2,updated_at=$3
+		WHERE channel='telegram' AND telegram_chat_id=$1 AND center_latitude IS NOT NULL`, chatID, language, now)
+	if err != nil {
+		return notification.Subscription{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return notification.Subscription{}, notification.ErrSubscriptionNotFound
+	}
+	return r.GetTelegramSubscription(ctx, chatID)
+}
+
+func (r *Repository) ActivateTelegramIntensity(ctx context.Context, chatID int64, minimumIntensity float64, now time.Time) (notification.Subscription, error) {
+	if minimumIntensity < 2 || minimumIntensity > 6 {
+		return notification.Subscription{}, notification.ErrInvalidIntensity
+	}
+	tag, err := r.Pool.Exec(ctx, `UPDATE notification_subscriptions SET
+		status='active',minimum_intensity=$2,minimum_magnitude=NULL,radius_km=NULL,updated_at=$3
+		WHERE channel='telegram' AND telegram_chat_id=$1 AND center_latitude IS NOT NULL
+			AND notification_language IS NOT NULL`, chatID, minimumIntensity, now)
+	if err != nil {
+		return notification.Subscription{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return notification.Subscription{}, notification.ErrSubscriptionNotFound
 	}
 	return r.GetTelegramSubscription(ctx, chatID)
 }
@@ -140,7 +172,8 @@ func (r *Repository) UpsertGlobalTelegramChannel(ctx context.Context, chatID int
 	case existingChatID == chatID:
 		_, err = tx.Exec(ctx, `UPDATE notification_subscriptions SET
 			name='Global earthquake channel',status='active',telegram_chat_username=$2,
-			minimum_magnitude=NULL,maximum_magnitude=NULL,center_latitude=NULL,center_longitude=NULL,
+			minimum_magnitude=NULL,maximum_magnitude=NULL,minimum_intensity=NULL,notification_language='en',
+			center_latitude=NULL,center_longitude=NULL,
 			radius_km=NULL,area=NULL,tsunami_only=FALSE,allowed_alert_levels=NULL,
 			allowed_event_types=ARRAY['earthquake'],notify_on_new=TRUE,
 			notify_on_threshold_crossing=FALSE,notify_on_tsunami_change=FALSE,
@@ -164,15 +197,17 @@ func upsertGlobalTelegramChannelTx(ctx context.Context, tx pgx.Tx, chatID int64,
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `INSERT INTO notification_subscriptions(
 		id,name,status,channel,telegram_chat_id,telegram_chat_username,subscription_kind,
-		minimum_magnitude,maximum_magnitude,center_latitude,center_longitude,radius_km,area,
+		minimum_magnitude,maximum_magnitude,minimum_intensity,notification_language,
+		center_latitude,center_longitude,radius_km,area,
 		tsunami_only,allowed_alert_levels,allowed_event_types,notify_on_new,
 		notify_on_threshold_crossing,notify_on_tsunami_change,notify_on_alert_increase,
 		maximum_event_age,created_at,updated_at)
 		VALUES(gen_random_uuid(),'Global earthquake channel','active','telegram',$1,$2,'global_channel',
-		NULL,NULL,NULL,NULL,NULL,NULL,FALSE,NULL,ARRAY['earthquake'],TRUE,FALSE,FALSE,FALSE,'2 hours',$3,$3)
+		NULL,NULL,NULL,'en',NULL,NULL,NULL,NULL,FALSE,NULL,ARRAY['earthquake'],TRUE,FALSE,FALSE,FALSE,'2 hours',$3,$3)
 		ON CONFLICT (telegram_chat_id) WHERE channel='telegram' DO UPDATE SET
 			name='Global earthquake channel',status='active',telegram_chat_username=EXCLUDED.telegram_chat_username,
 			subscription_kind='global_channel',minimum_magnitude=NULL,maximum_magnitude=NULL,
+			minimum_intensity=NULL,notification_language='en',
 			center_latitude=NULL,center_longitude=NULL,radius_km=NULL,area=NULL,tsunami_only=FALSE,
 			allowed_alert_levels=NULL,allowed_event_types=ARRAY['earthquake'],notify_on_new=TRUE,
 			notify_on_threshold_crossing=FALSE,notify_on_tsunami_change=FALSE,

@@ -18,6 +18,7 @@ type Trigger string
 const (
 	NewEvent                  Trigger = "new_event"
 	MagnitudeThresholdCrossed Trigger = "magnitude_threshold_crossed"
+	IntensityThresholdCrossed Trigger = "intensity_threshold_crossed"
 	TsunamiActivated          Trigger = "tsunami_activated"
 	AlertLevelIncreased       Trigger = "alert_level_increased"
 )
@@ -32,8 +33,10 @@ type Subscription struct {
 	EncryptedWebhookSecret    []byte
 	TelegramChatID            *int64
 	TelegramChatUsername      *string
+	NotificationLanguage      *string
 	MinimumMagnitude          *float64
 	MaximumMagnitude          *float64
+	MinimumIntensity          *float64
 	CenterLatitude            *float64
 	CenterLongitude           *float64
 	RadiusKM                  *float64
@@ -49,6 +52,23 @@ type Subscription struct {
 	UpdatedAt                 time.Time
 }
 
+func IntensityTriggers(s Subscription, old *earthquake.Event, current earthquake.Event, oldUpperMMI *float64,
+	currentUpperMMI float64, mode string, now time.Time, baselineComplete bool) []Trigger {
+	if s.Status != "active" || s.MinimumIntensity == nil || currentUpperMMI < *s.MinimumIntensity || !matchesNonMagnitude(s, current) {
+		return nil
+	}
+	if old == nil {
+		if mode == "realtime" && baselineComplete && s.NotifyOnNew && now.Sub(current.OccurredAt) <= s.MaximumEventAge {
+			return []Trigger{NewEvent}
+		}
+		return nil
+	}
+	if s.NotifyOnThresholdCrossing && (oldUpperMMI == nil || *oldUpperMMI < *s.MinimumIntensity) {
+		return []Trigger{IntensityThresholdCrossed}
+	}
+	return nil
+}
+
 func (s Subscription) Validate(maxRadius float64, production bool) error {
 	if s.Name == "" || (s.Channel != "webhook" && s.Channel != "telegram") {
 		return ErrInvalidSubscription
@@ -57,8 +77,20 @@ func (s Subscription) Validate(maxRadius float64, production bool) error {
 		return ErrInvalidSubscription
 	}
 	geo := s.CenterLatitude != nil || s.CenterLongitude != nil || s.RadiusKM != nil
-	if geo && (s.CenterLatitude == nil || s.CenterLongitude == nil || s.RadiusKM == nil || *s.RadiusKM <= 0 || *s.RadiusKM > maxRadius) {
+	intensityGeography := s.Channel == "telegram" && s.MinimumIntensity != nil
+	if geo && (s.CenterLatitude == nil || s.CenterLongitude == nil ||
+		(s.RadiusKM == nil && !intensityGeography) ||
+		(s.RadiusKM != nil && (*s.RadiusKM <= 0 || *s.RadiusKM > maxRadius))) {
 		return ErrInvalidGeography
+	}
+	if s.MinimumIntensity != nil && (s.CenterLatitude == nil || s.CenterLongitude == nil) {
+		return ErrInvalidGeography
+	}
+	if s.MinimumIntensity != nil && (*s.MinimumIntensity < 2 || *s.MinimumIntensity > 6) {
+		return ErrInvalidIntensity
+	}
+	if s.NotificationLanguage != nil && *s.NotificationLanguage != "en" && *s.NotificationLanguage != "ru" {
+		return ErrInvalidLanguage
 	}
 	if s.MinimumMagnitude != nil && s.MaximumMagnitude != nil && *s.MinimumMagnitude > *s.MaximumMagnitude {
 		return ErrInvalidMagnitudeRange
@@ -81,6 +113,8 @@ const (
 	ErrInvalidSubscription   validationError = "invalid subscription"
 	ErrInvalidGeography      validationError = "invalid geographic filter"
 	ErrInvalidMagnitudeRange validationError = "minimum magnitude exceeds maximum magnitude"
+	ErrInvalidIntensity      validationError = "minimum intensity must be between 2 and 6"
+	ErrInvalidLanguage       validationError = "notification language must be en or ru"
 	ErrInvalidWebhookURL     validationError = "invalid webhook URL"
 )
 
@@ -133,6 +167,10 @@ func matches(s Subscription, e earthquake.Event) bool {
 	if s.MaximumMagnitude != nil && (e.Magnitude == nil || *e.Magnitude > *s.MaximumMagnitude) {
 		return false
 	}
+	return matchesNonMagnitude(s, e)
+}
+
+func matchesNonMagnitude(s Subscription, e earthquake.Event) bool {
 	if s.TsunamiOnly && (e.Tsunami == nil || !*e.Tsunami) {
 		return false
 	}

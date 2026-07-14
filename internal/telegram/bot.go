@@ -15,9 +15,8 @@ import (
 )
 
 const (
-	registrationRadiusKM = 1000.0
-	stateProvider        = "telegram"
-	stateUpdatesOffset   = "updates_offset"
+	stateProvider      = "telegram"
+	stateUpdatesOffset = "updates_offset"
 )
 
 type BotStore interface {
@@ -25,7 +24,8 @@ type BotStore interface {
 	SetState(context.Context, string, string, string, time.Time) error
 	AcquireTelegramPoller(context.Context) (func(), bool, error)
 	UpsertTelegramLocation(context.Context, int64, float64, float64, float64, time.Time) (domainnotification.Subscription, error)
-	ActivateTelegramSubscription(context.Context, int64, float64, time.Time) (domainnotification.Subscription, error)
+	SetTelegramLanguage(context.Context, int64, string, time.Time) (domainnotification.Subscription, error)
+	ActivateTelegramIntensity(context.Context, int64, float64, time.Time) (domainnotification.Subscription, error)
 	GetTelegramSubscription(context.Context, int64) (domainnotification.Subscription, error)
 	DisableTelegramSubscription(context.Context, int64, time.Time) error
 }
@@ -35,6 +35,7 @@ type BotAPI interface {
 	SendMessage(context.Context, int64, string) error
 	SendMessageRemovingKeyboard(context.Context, int64, string) error
 	RequestLocation(context.Context, int64, string) error
+	RequestChoice(context.Context, int64, string, []string) error
 	AnswerCallbackQuery(context.Context, string, string) error
 	SendLocation(context.Context, int64, int64, float64, float64) error
 }
@@ -112,12 +113,12 @@ func (b *Bot) handle(ctx context.Context, update Update) error {
 	chatID := message.Chat.ID
 	if message.Location != nil {
 		if !validLocation(*message.Location) {
-			return b.api.SendMessage(ctx, chatID, "The location is invalid. Please share it again.")
+			return b.api.SendMessage(ctx, chatID, "Invalid location. Please share it again. / Некорректная локация. Отправьте её ещё раз.")
 		}
-		if _, err := b.store.UpsertTelegramLocation(ctx, chatID, message.Location.Latitude, message.Location.Longitude, registrationRadiusKM, b.clock.Now()); err != nil {
+		if _, err := b.store.UpsertTelegramLocation(ctx, chatID, message.Location.Latitude, message.Location.Longitude, 0, b.clock.Now()); err != nil {
 			return err
 		}
-		return b.api.SendMessageRemovingKeyboard(ctx, chatID, "Location saved. Send the minimum magnitude as a number, for example: 4.5")
+		return b.requestLanguage(ctx, chatID)
 	}
 
 	text := strings.TrimSpace(message.Text)
@@ -129,50 +130,172 @@ func (b *Bot) handle(ctx context.Context, update Update) error {
 	case "/start":
 		subscription, err := b.store.GetTelegramSubscription(ctx, chatID)
 		if errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
-			return b.api.RequestLocation(ctx, chatID, "Share your location to receive earthquake alerts within 1000 km.")
+			return b.api.RequestLocation(ctx, chatID, "Share your location to receive local earthquake alerts. / Отправьте локацию для локальных оповещений.")
 		}
 		if err != nil {
 			return err
+		}
+		if subscription.Status == "active" && subscription.MinimumIntensity != nil {
+			return b.api.SendMessage(ctx, chatID, statusText(subscription))
+		}
+		if subscription.NotificationLanguage == nil {
+			return b.requestLanguage(ctx, chatID)
 		}
 		if subscription.Status == "active" && subscription.MinimumMagnitude != nil {
-			return b.api.SendMessage(ctx, chatID, fmt.Sprintf("Alerts are already active within 1000 km for magnitude %.1f and above. Use /location to change your location.", *subscription.MinimumMagnitude))
+			return b.api.SendMessage(ctx, chatID, legacyText(subscription))
 		}
-		return b.api.SendMessage(ctx, chatID, "Your location is already saved. Send the minimum magnitude, or use /location to replace it.")
+		return b.requestIntensity(ctx, chatID, languageOf(subscription))
 	case "/location":
-		return b.api.RequestLocation(ctx, chatID, "Share your location to receive earthquake alerts within 1000 km.")
-	case "/stop":
-		err := b.store.DisableTelegramSubscription(ctx, chatID, b.clock.Now())
+		language := b.subscriptionLanguage(ctx, chatID)
+		return b.api.RequestLocation(ctx, chatID, localize(language,
+			"Share your new location.", "Отправьте новую локацию."))
+	case "/language":
+		return b.requestLanguage(ctx, chatID)
+	case "/intensity":
+		subscription, err := b.store.GetTelegramSubscription(ctx, chatID)
 		if errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
-			return b.api.SendMessage(ctx, chatID, "There is no active alert subscription.")
+			return b.api.RequestLocation(ctx, chatID, "Share your location first. / Сначала отправьте локацию.")
 		}
 		if err != nil {
 			return err
 		}
-		return b.api.SendMessage(ctx, chatID, "Earthquake alerts have been disabled. Send /start to enable them again.")
+		return b.requestIntensity(ctx, chatID, languageOf(subscription))
+	case "/stop":
+		language := b.subscriptionLanguage(ctx, chatID)
+		err := b.store.DisableTelegramSubscription(ctx, chatID, b.clock.Now())
+		if errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
+			return b.api.SendMessage(ctx, chatID, localize(language,
+				"There is no alert subscription.", "Подписка на оповещения не настроена."))
+		}
+		if err != nil {
+			return err
+		}
+		return b.api.SendMessage(ctx, chatID, localize(language,
+			"Earthquake alerts have been disabled. Send /start to enable them again.",
+			"Оповещения отключены. Отправьте /start, чтобы включить их снова."))
 	case "/status":
 		subscription, err := b.store.GetTelegramSubscription(ctx, chatID)
 		if errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
-			return b.api.RequestLocation(ctx, chatID, "No location is configured. Share your location to get started.")
+			return b.api.RequestLocation(ctx, chatID, "No location is configured. / Локация не настроена.")
 		}
 		if err != nil {
 			return err
 		}
-		if subscription.Status != "active" || subscription.MinimumMagnitude == nil {
-			return b.api.SendMessage(ctx, chatID, "Your location is saved, but alerts are not active. Send the minimum magnitude.")
+		if subscription.Status == "active" && subscription.MinimumIntensity != nil {
+			return b.api.SendMessage(ctx, chatID, statusText(subscription))
 		}
-		return b.api.SendMessage(ctx, chatID, fmt.Sprintf("Alerts are active within 1000 km for magnitude %.1f and above.", *subscription.MinimumMagnitude))
+		if subscription.Status == "active" && subscription.MinimumMagnitude != nil {
+			return b.api.SendMessage(ctx, chatID, legacyText(subscription))
+		}
+		return b.requestIntensity(ctx, chatID, languageOf(subscription))
 	}
 
-	magnitude, err := strconv.ParseFloat(text, 64)
-	if err != nil || math.IsNaN(magnitude) || math.IsInf(magnitude, 0) || magnitude < 0 || magnitude > 10 {
-		return b.api.SendMessage(ctx, chatID, "Send a minimum magnitude between 0 and 10, or use /start to share a location.")
+	if language, ok := parseLanguage(text); ok {
+		subscription, err := b.store.SetTelegramLanguage(ctx, chatID, language, b.clock.Now())
+		if errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
+			return b.api.RequestLocation(ctx, chatID, "Share your location first. / Сначала отправьте локацию.")
+		}
+		if err != nil {
+			return err
+		}
+		if subscription.MinimumIntensity == nil && subscription.MinimumMagnitude == nil {
+			return b.requestIntensity(ctx, chatID, language)
+		}
+		return b.api.SendMessageRemovingKeyboard(ctx, chatID, localize(language,
+			"Notification language changed to English.", "Язык оповещений изменён на русский."))
 	}
-	if _, err := b.store.ActivateTelegramSubscription(ctx, chatID, magnitude, b.clock.Now()); errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
-		return b.api.RequestLocation(ctx, chatID, "Share your location before setting the minimum magnitude.")
+	intensity, ok := parseIntensity(text)
+	if !ok {
+		language := b.subscriptionLanguage(ctx, chatID)
+		return b.api.SendMessage(ctx, chatID, localize(language,
+			"Choose an intensity from II to VI, or use /start.",
+			"Выберите интенсивность от II до VI или используйте /start."))
+	}
+	if _, err := b.store.ActivateTelegramIntensity(ctx, chatID, intensity, b.clock.Now()); errors.Is(err, domainnotification.ErrSubscriptionNotFound) {
+		return b.api.RequestLocation(ctx, chatID, "Share your location and choose a language first. / Сначала отправьте локацию и выберите язык.")
 	} else if err != nil {
 		return err
 	}
-	return b.api.SendMessage(ctx, chatID, fmt.Sprintf("Alerts enabled: magnitude %.1f and above within 1000 km. Use /status to check or /stop to disable.", magnitude))
+	language := b.subscriptionLanguage(ctx, chatID)
+	return b.api.SendMessageRemovingKeyboard(ctx, chatID, localize(language,
+		fmt.Sprintf("Alerts enabled for expected intensity %s and above. Use /status or /stop.", romanMMI(intensity)),
+		fmt.Sprintf("Оповещения включены для ожидаемой интенсивности %s и выше. Команды: /status, /stop.", romanMMI(intensity))))
+}
+
+func (b *Bot) requestLanguage(ctx context.Context, chatID int64) error {
+	return b.api.RequestChoice(ctx, chatID, "Choose notification language. / Выберите язык оповещений.", []string{"Русский", "English"})
+}
+
+func (b *Bot) requestIntensity(ctx context.Context, chatID int64, language string) error {
+	return b.api.RequestChoice(ctx, chatID, localize(language,
+		"Choose the minimum expected shaking intensity at your location.",
+		"Выберите минимальную ожидаемую интенсивность толчков в вашей локации."),
+		[]string{"II", "III", "IV", "V", "VI"})
+}
+
+func (b *Bot) subscriptionLanguage(ctx context.Context, chatID int64) string {
+	subscription, err := b.store.GetTelegramSubscription(ctx, chatID)
+	if err != nil {
+		return "en"
+	}
+	return languageOf(subscription)
+}
+
+func languageOf(subscription domainnotification.Subscription) string {
+	if subscription.NotificationLanguage != nil && *subscription.NotificationLanguage == "ru" {
+		return "ru"
+	}
+	return "en"
+}
+
+func parseLanguage(text string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "ru", "rus", "русский", "рус":
+		return "ru", true
+	case "en", "eng", "english":
+		return "en", true
+	default:
+		return "", false
+	}
+}
+
+func parseIntensity(text string) (float64, bool) {
+	values := map[string]float64{"II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
+	if value, ok := values[strings.ToUpper(strings.TrimSpace(text))]; ok {
+		return value, true
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	return value, err == nil && !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 2 && value <= 6
+}
+
+func statusText(subscription domainnotification.Subscription) string {
+	language := languageOf(subscription)
+	return localize(language,
+		fmt.Sprintf("Alerts are active for expected intensity %s and above. Use /location, /language, /intensity, or /stop.", romanMMI(*subscription.MinimumIntensity)),
+		fmt.Sprintf("Оповещения активны для ожидаемой интенсивности %s и выше. Команды: /location, /language, /intensity, /stop.", romanMMI(*subscription.MinimumIntensity)))
+}
+
+func legacyText(subscription domainnotification.Subscription) string {
+	language := languageOf(subscription)
+	return localize(language,
+		fmt.Sprintf("Legacy alerts are active for magnitude %.1f and above within the previous radius. Use /intensity to switch to local shaking intensity.", *subscription.MinimumMagnitude),
+		fmt.Sprintf("Старые оповещения активны для магнитуды %.1f и выше в прежнем радиусе. Используйте /intensity, чтобы перейти на интенсивность в вашей локации.", *subscription.MinimumMagnitude))
+}
+
+func localize(language, english, russian string) string {
+	if language == "ru" {
+		return russian
+	}
+	return english
+}
+
+func romanMMI(value float64) string {
+	roman := []string{"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+	index := int(math.Round(value)) - 1
+	if index < 0 || index >= len(roman) {
+		return fmt.Sprintf("%.1f MMI", value)
+	}
+	return roman[index]
 }
 
 func (b *Bot) handleCallbackQuery(ctx context.Context, query CallbackQuery) error {

@@ -42,6 +42,25 @@ func TestNewEventRequiresRealtimeBaselineAndFreshness(t *testing.T) {
 		t.Fatal("old event notified")
 	}
 }
+
+func TestIntensityTriggersUseConservativeUpperBound(t *testing.T) {
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	threshold := 4.0
+	s := Subscription{Status: "active", MinimumIntensity: &threshold, NotifyOnNew: true,
+		NotifyOnThresholdCrossing: true, MaximumEventAge: 2 * time.Hour}
+	event := earthquake.Event{OccurredAt: now.Add(-time.Minute)}
+	if got := IntensityTriggers(s, nil, event, nil, 4.1, "realtime", now, true); len(got) != 1 || got[0] != NewEvent {
+		t.Fatalf("new event triggers=%v", got)
+	}
+	if got := IntensityTriggers(s, nil, event, nil, 3.9, "realtime", now, true); len(got) != 0 {
+		t.Fatalf("below-threshold triggers=%v", got)
+	}
+	oldUpper := 3.8
+	if got := IntensityTriggers(s, &event, event, &oldUpper, 4.2, "realtime", now, true); len(got) != 1 || got[0] != IntensityThresholdCrossed {
+		t.Fatalf("crossing triggers=%v", got)
+	}
+}
+
 func TestAlertSeverity(t *testing.T) {
 	for i, v := range []string{"none", "green", "yellow", "orange", "red"} {
 		if got := AlertSeverity(&v); got != i {
@@ -63,5 +82,21 @@ func TestTelegramSubscriptionValidation(t *testing.T) {
 	subscription.TelegramChatID = nil
 	if err := subscription.Validate(2000, true); err == nil {
 		t.Fatal("Telegram subscription without chat ID accepted")
+	}
+}
+
+func TestIntensitySubscriptionRequiresLocation(t *testing.T) {
+	chatID := int64(42)
+	intensity := 4.0
+	subscription := Subscription{
+		Name: "telegram:42", Channel: "telegram", TelegramChatID: &chatID, MinimumIntensity: &intensity,
+	}
+	if err := subscription.Validate(2000, true); err != ErrInvalidGeography {
+		t.Fatalf("validation error=%v", err)
+	}
+	latitude, longitude := 40.1, 74.2
+	subscription.CenterLatitude, subscription.CenterLongitude = &latitude, &longitude
+	if err := subscription.Validate(2000, true); err != nil {
+		t.Fatalf("valid intensity subscription rejected: %v", err)
 	}
 }

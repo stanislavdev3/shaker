@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,16 +30,27 @@ func (s *fakeStore) AcquireTelegramPoller(context.Context) (func(), bool, error)
 func (s *fakeStore) UpsertTelegramLocation(_ context.Context, chatID int64, latitude, longitude, radius float64, now time.Time) (domainnotification.Subscription, error) {
 	s.subscription = domainnotification.Subscription{
 		Name: "telegram:42", Status: "paused", Channel: "telegram", TelegramChatID: &chatID,
-		CenterLatitude: &latitude, CenterLongitude: &longitude, RadiusKM: &radius, UpdatedAt: now,
+		CenterLatitude: &latitude, CenterLongitude: &longitude, UpdatedAt: now,
+	}
+	if radius > 0 {
+		s.subscription.RadiusKM = &radius
 	}
 	return s.subscription, nil
 }
-func (s *fakeStore) ActivateTelegramSubscription(_ context.Context, chatID int64, magnitude float64, now time.Time) (domainnotification.Subscription, error) {
+func (s *fakeStore) SetTelegramLanguage(_ context.Context, chatID int64, language string, now time.Time) (domainnotification.Subscription, error) {
 	if s.subscription.TelegramChatID == nil || *s.subscription.TelegramChatID != chatID {
 		return domainnotification.Subscription{}, domainnotification.ErrSubscriptionNotFound
 	}
+	s.subscription.NotificationLanguage = &language
+	s.subscription.UpdatedAt = now
+	return s.subscription, nil
+}
+func (s *fakeStore) ActivateTelegramIntensity(_ context.Context, chatID int64, intensity float64, now time.Time) (domainnotification.Subscription, error) {
+	if s.subscription.TelegramChatID == nil || *s.subscription.TelegramChatID != chatID || s.subscription.NotificationLanguage == nil {
+		return domainnotification.Subscription{}, domainnotification.ErrSubscriptionNotFound
+	}
 	s.subscription.Status = "active"
-	s.subscription.MinimumMagnitude = &magnitude
+	s.subscription.MinimumIntensity = &intensity
 	s.subscription.UpdatedAt = now
 	return s.subscription, nil
 }
@@ -58,6 +70,7 @@ func (s *fakeStore) DisableTelegramSubscription(context.Context, int64, time.Tim
 
 type fakeAPI struct {
 	messages                   []string
+	choices                    []string
 	answeredCallbackID         string
 	locationChatID, locationID int64
 	latitude, longitude        float64
@@ -76,6 +89,11 @@ func (a *fakeAPI) SendMessageRemovingKeyboard(_ context.Context, _ int64, text s
 }
 func (a *fakeAPI) RequestLocation(_ context.Context, _ int64, text string) error {
 	a.messages = append(a.messages, text)
+	return nil
+}
+func (a *fakeAPI) RequestChoice(_ context.Context, _ int64, text string, choices []string) error {
+	a.messages = append(a.messages, "choice:"+text)
+	a.choices = append([]string(nil), choices...)
 	return nil
 }
 func (a *fakeAPI) AnswerCallbackQuery(_ context.Context, callbackID, _ string) error {
@@ -101,20 +119,34 @@ func TestRegistrationFlow(t *testing.T) {
 	if err := bot.handle(ctx, Update{ID: 2, Message: &Message{Chat: chat, Location: &Location{Latitude: 40.1, Longitude: 74.2}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := bot.handle(ctx, Update{ID: 3, Message: &Message{Chat: chat, Text: "4.5"}}); err != nil {
+	if err := bot.handle(ctx, Update{ID: 3, Message: &Message{Chat: chat, Text: "Русский"}}); err != nil {
 		t.Fatal(err)
 	}
-	if store.subscription.Status != "active" || store.subscription.MinimumMagnitude == nil || *store.subscription.MinimumMagnitude != 4.5 {
+	if err := bot.handle(ctx, Update{ID: 4, Message: &Message{Chat: chat, Text: "IV"}}); err != nil {
+		t.Fatal(err)
+	}
+	if store.subscription.Status != "active" || store.subscription.MinimumIntensity == nil || *store.subscription.MinimumIntensity != 4 {
 		t.Fatalf("unexpected subscription: %+v", store.subscription)
 	}
-	if store.subscription.RadiusKM == nil || *store.subscription.RadiusKM != 1000 {
-		t.Fatalf("radius = %v", store.subscription.RadiusKM)
+	if store.subscription.NotificationLanguage == nil || *store.subscription.NotificationLanguage != "ru" || store.subscription.RadiusKM != nil {
+		t.Fatalf("language/radius = %v/%v", store.subscription.NotificationLanguage, store.subscription.RadiusKM)
 	}
-	if len(api.messages) != 3 {
+	if len(api.messages) != 4 {
 		t.Fatalf("messages = %v", api.messages)
 	}
-	if len(api.messages[1]) < len("remove:") || api.messages[1][:len("remove:")] != "remove:" {
-		t.Fatalf("location reply did not remove keyboard: %v", api.messages)
+	if !strings.HasPrefix(api.messages[1], "choice:") || !strings.HasPrefix(api.messages[3], "remove:") {
+		t.Fatalf("unexpected keyboards: %v", api.messages)
+	}
+	if got := strings.Join(api.choices, ","); got != "II,III,IV,V,VI" {
+		t.Fatalf("intensity choices=%q", got)
+	}
+}
+
+func TestParseIntensityRejectsThresholdAboveStrong(t *testing.T) {
+	for _, value := range []string{"VII", "7", "X"} {
+		if _, ok := parseIntensity(value); ok {
+			t.Fatalf("accepted intensity threshold %q", value)
+		}
 	}
 }
 
@@ -136,8 +168,10 @@ func TestLocationCallback(t *testing.T) {
 func TestStartDoesNotRequestLocationWhenAlreadyConfigured(t *testing.T) {
 	chatID := int64(42)
 	magnitude := 4.5
+	language := "en"
 	store := &fakeStore{subscription: domainnotification.Subscription{
 		Status: "active", Channel: "telegram", TelegramChatID: &chatID, MinimumMagnitude: &magnitude,
+		NotificationLanguage: &language,
 	}}
 	api := &fakeAPI{}
 	bot := NewBot(store, api, fixedClock{now: time.Now()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -145,7 +179,7 @@ func TestStartDoesNotRequestLocationWhenAlreadyConfigured(t *testing.T) {
 	if err := bot.handle(context.Background(), Update{ID: 1, Message: &Message{Chat: Chat{ID: chatID}, Text: "/start"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(api.messages) != 1 || api.messages[0] == "Share your location to receive earthquake alerts within 1000 km." {
+	if len(api.messages) != 1 || strings.Contains(api.messages[0], "Share your location") {
 		t.Fatalf("unexpected messages: %v", api.messages)
 	}
 }

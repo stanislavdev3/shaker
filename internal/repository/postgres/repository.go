@@ -13,6 +13,7 @@ import (
 
 	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/domain/notification"
+	"github.com/example/earthquake-service/internal/domain/shaking"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -425,14 +426,19 @@ func changedFields(a, b earthquake.Event) map[string]any {
 }
 
 func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, mode string, baseline bool, now time.Time) error {
+	candidateRadiusKM := shaking.CandidateRadiusKM(change.Current.Magnitude, change.Current.DepthKM)
 	rows, err := tx.Query(ctx, `SELECT id,name,status,channel,webhook_url,encrypted_webhook_secret,minimum_magnitude,
-		maximum_magnitude,center_latitude,center_longitude,radius_km,tsunami_only,allowed_alert_levels,allowed_event_types,
+		maximum_magnitude,minimum_intensity,notification_language,subscription_kind,
+		center_latitude,center_longitude,radius_km,tsunami_only,allowed_alert_levels,allowed_event_types,
 		notify_on_new,notify_on_threshold_crossing,notify_on_tsunami_change,notify_on_alert_increase,
 		EXTRACT(EPOCH FROM maximum_event_age)::bigint,telegram_chat_id,
 		CASE WHEN area IS NULL THEN NULL ELSE ST_Distance(area,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)/1000 END,
 		created_at,updated_at FROM notification_subscriptions WHERE status='active' AND
-		(area IS NULL OR ST_DWithin(area,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,radius_km*1000))`,
-		change.Current.Longitude, change.Current.Latitude)
+		((minimum_intensity IS NOT NULL AND area IS NOT NULL AND $3>0 AND
+			ST_DWithin(area,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,$3*1000))
+		OR (minimum_intensity IS NULL AND (area IS NULL OR (radius_km IS NOT NULL AND
+			ST_DWithin(area,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,radius_km*1000)))))`,
+		change.Current.Longitude, change.Current.Latitude, candidateRadiusKM)
 	if err != nil {
 		return err
 	}
@@ -448,7 +454,8 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 		var distanceKM *float64
 		var maximumEventAgeSeconds int64
 		if err := rows.Scan(&s.ID, &s.Name, &s.Status, &s.Channel, &webhookURL, &encryptedSecret, &s.MinimumMagnitude,
-			&s.MaximumMagnitude, &s.CenterLatitude, &s.CenterLongitude, &s.RadiusKM, &s.TsunamiOnly, &s.AllowedAlertLevels,
+			&s.MaximumMagnitude, &s.MinimumIntensity, &s.NotificationLanguage, &s.SubscriptionKind,
+			&s.CenterLatitude, &s.CenterLongitude, &s.RadiusKM, &s.TsunamiOnly, &s.AllowedAlertLevels,
 			&s.AllowedEventTypes, &s.NotifyOnNew, &s.NotifyOnThresholdCrossing, &s.NotifyOnTsunamiChange, &s.NotifyOnAlertIncrease,
 			&maximumEventAgeSeconds, &s.TelegramChatID, &distanceKM, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return err
@@ -473,9 +480,40 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 		s := item.subscription
 		current := change.Current
 		current.DistanceKM = item.distanceKM
-		for _, trigger := range notification.Triggers(s, change.Previous, change.Current, mode, now, baseline) {
+		var estimate *shaking.Estimate
+		var triggers []notification.Trigger
+		if s.SubscriptionKind == "user" && s.Channel == "telegram" && s.MinimumIntensity != nil && item.distanceKM != nil {
+			calculated, estimateErr := shaking.EstimateAt(current.Magnitude, current.DepthKM, *item.distanceKM, current.MagnitudeType)
+			if estimateErr != nil {
+				continue
+			}
+			estimate = &calculated
+			var oldUpper *float64
+			if change.Previous != nil && s.CenterLatitude != nil && s.CenterLongitude != nil {
+				oldDistance := shaking.SurfaceDistanceKM(*s.CenterLatitude, *s.CenterLongitude,
+					change.Previous.Latitude, change.Previous.Longitude)
+				if oldEstimate, oldErr := shaking.EstimateAt(change.Previous.Magnitude, change.Previous.DepthKM,
+					oldDistance, change.Previous.MagnitudeType); oldErr == nil {
+					oldUpper = &oldEstimate.UpperMMI
+				}
+			}
+			triggers = notification.IntensityTriggers(s, change.Previous, current, oldUpper,
+				calculated.UpperMMI, mode, now, baseline)
+			decision := "below_threshold"
+			if len(triggers) > 0 {
+				decision = "notify"
+			}
+			if err := insertIntensityEvaluation(ctx, tx, s.ID, current.ID, current.Version,
+				*s.MinimumIntensity, calculated, decision, now); err != nil {
+				return err
+			}
+		} else {
+			triggers = notification.Triggers(s, change.Previous, change.Current, mode, now, baseline)
+		}
+		for _, trigger := range triggers {
 			deliveryID := uuid.New()
-			payload := notificationPayload(deliveryID, string(trigger), current, sourceLinks, now)
+			payload := notificationPayload(deliveryID, string(trigger), current, sourceLinks,
+				s.NotificationLanguage, estimate, now)
 			if s.Channel == "telegram" {
 				if _, err := upsertTelegramAlertMessage(ctx, tx, s.ID, current.ID, current.Version,
 					string(current.Lifecycle), payload, now); err != nil {
@@ -496,7 +534,7 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 }
 
 func refreshTelegramAlertMessages(ctx context.Context, tx pgx.Tx, current earthquake.Event, now time.Time) error {
-	rows, err := tx.Query(ctx, `SELECT a.subscription_id,
+	rows, err := tx.Query(ctx, `SELECT a.subscription_id,s.minimum_intensity,s.notification_language,
 		CASE WHEN s.area IS NULL THEN NULL ELSE ST_Distance(s.area,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)/1000 END
 		FROM telegram_alert_messages a
 		JOIN notification_subscriptions s ON s.id=a.subscription_id
@@ -505,13 +543,15 @@ func refreshTelegramAlertMessages(ctx context.Context, tx pgx.Tx, current earthq
 		return err
 	}
 	type existingAlert struct {
-		subscriptionID uuid.UUID
-		distanceKM     *float64
+		subscriptionID   uuid.UUID
+		minimumIntensity *float64
+		language         *string
+		distanceKM       *float64
 	}
 	var alerts []existingAlert
 	for rows.Next() {
 		var alert existingAlert
-		if err := rows.Scan(&alert.subscriptionID, &alert.distanceKM); err != nil {
+		if err := rows.Scan(&alert.subscriptionID, &alert.minimumIntensity, &alert.language, &alert.distanceKM); err != nil {
 			rows.Close()
 			return err
 		}
@@ -529,7 +569,18 @@ func refreshTelegramAlertMessages(ctx context.Context, tx pgx.Tx, current earthq
 	for _, alert := range alerts {
 		event := current
 		event.DistanceKM = alert.distanceKM
-		payload := notificationPayload(uuid.New(), "earthquake_update", event, sourceLinks, now)
+		var estimate *shaking.Estimate
+		if alert.minimumIntensity != nil && alert.distanceKM != nil {
+			calculated, estimateErr := shaking.EstimateAt(event.Magnitude, event.DepthKM, *alert.distanceKM, event.MagnitudeType)
+			if estimateErr == nil {
+				estimate = &calculated
+				if err := insertIntensityEvaluation(ctx, tx, alert.subscriptionID, current.ID, current.Version,
+					*alert.minimumIntensity, calculated, "refresh", now); err != nil {
+					return err
+				}
+			}
+		}
+		payload := notificationPayload(uuid.New(), "earthquake_update", event, sourceLinks, alert.language, estimate, now)
 		if _, err := upsertTelegramAlertMessage(ctx, tx, alert.subscriptionID, current.ID, current.Version,
 			string(current.Lifecycle), payload, now); err != nil {
 			return err
@@ -561,7 +612,27 @@ func providerSourceLinks(ctx context.Context, tx pgx.Tx, earthquakeID uuid.UUID)
 	return links, rows.Err()
 }
 
-func notificationPayload(deliveryID uuid.UUID, trigger string, event earthquake.Event, sourceLinks map[string]string, now time.Time) json.RawMessage {
+func insertIntensityEvaluation(ctx context.Context, tx pgx.Tx, subscriptionID, earthquakeID uuid.UUID,
+	earthquakeVersion int64, threshold float64, estimate shaking.Estimate, decision string, now time.Time) error {
+	assumptions, err := json.Marshal(estimate.Assumptions)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO notification_intensity_evaluations(
+		id,subscription_id,earthquake_id,earthquake_version,model_name,model_version,mean_mmi,sigma_mmi,
+		lower_mmi,upper_mmi,threshold_mmi,epicentral_distance_km,hypocentral_distance_km,magnitude,
+		depth_km,decision,assumptions,created_at)
+		VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		ON CONFLICT(subscription_id,earthquake_id,earthquake_version,model_version) DO NOTHING`,
+		subscriptionID, earthquakeID, earthquakeVersion, estimate.ModelName, estimate.ModelVersion,
+		estimate.MeanMMI, estimate.SigmaMMI, estimate.LowerMMI, estimate.UpperMMI, threshold,
+		estimate.EpicentralDistanceKM, estimate.HypocentralDistanceKM, estimate.Magnitude, estimate.DepthKM,
+		decision, assumptions, now)
+	return err
+}
+
+func notificationPayload(deliveryID uuid.UUID, trigger string, event earthquake.Event, sourceLinks map[string]string,
+	language *string, estimate *shaking.Estimate, now time.Time) json.RawMessage {
 	lifecycle := event.Lifecycle
 	if lifecycle == "" {
 		lifecycle = earthquake.Confirmed
@@ -573,6 +644,8 @@ func notificationPayload(deliveryID uuid.UUID, trigger string, event earthquake.
 		"created_at":  now,
 		"earthquake":  event,
 		"sources":     sourceLinks,
+		"language":    language,
+		"shaking":     estimate,
 	})
 	return payload
 }

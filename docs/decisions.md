@@ -31,6 +31,20 @@ automatically associated. See [event-correlation.md](event-correlation.md).
 
 Delivery creation must be atomic with earthquake changes. PostgreSQL provides this atomicity, uniqueness constraints, durable storage, `FOR UPDATE SKIP LOCKED`, and abandoned-lock recovery without another operational dependency.
 
+## Personal alerts use local shaking intensity
+
+New personal Telegram subscriptions use expected Modified Mercalli Intensity at the
+subscriber point instead of a fixed epicentral radius and minimum magnitude. Preliminary
+estimates use the Allen, Wald, and Worden (2012) hypocentral-distance IPE. The alert
+decision uses the one-sigma upper estimate to reduce false negatives, while the message
+shows the central estimate and range. Model inputs, assumptions, version, uncertainty,
+and decisions are immutable audit records. A future observed ShakeMap can replace the
+preliminary estimate without discarding it.
+
+Existing magnitude-and-radius subscriptions are not silently converted because no
+scientifically valid one-to-one mapping exists. They remain in legacy mode until the
+user chooses an MMI threshold.
+
 ## Cursor pagination
 
 Offset pagination becomes unstable as new reports arrive and becomes increasingly expensive. Integrity-protected cursors carry the sort and deterministic tie-break tuple. They reject tampering and reuse under another ordering.
@@ -51,7 +65,9 @@ Normalized columns support stable application queries while source records retai
 
 - The USGS `updated` timestamp is the provider ordering authority. An equal timestamp with a different canonical payload is treated as a material correction.
 - A 20,000-result historical page uses the documented FDSN offset mechanism; 24-hour default windows reduce limit pressure.
-- The maximum public and subscription radius is 2,000 km.
+- The maximum public and webhook subscription radius is 2,000 km. Personal MMI alert
+  candidate radii are event-dependent and bounded internally to half the Earth's
+  circumference.
 - Public searches are bounded to 200 rows per page. No fixed time-range limit is imposed because cursor queries use indexed deterministic order.
 - The supplied PostGIS database has permission to install `postgis` and `pgcrypto`.
 - Compose applies the initial migration only when creating a new database volume; Atlas is the migration mechanism for existing environments.

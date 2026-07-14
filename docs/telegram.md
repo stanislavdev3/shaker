@@ -3,16 +3,26 @@
 The Telegram bot creates earthquake alert subscriptions through a short chat flow:
 
 1. The user sends `/start` and shares a Telegram location.
-2. The bot stores that point with a fixed 1,000 km radius and asks for a minimum magnitude.
-3. The user sends a number from 0 to 10, which activates the subscription.
+2. The bot stores that point and asks for the notification language (`ru` or `en`).
+3. The user chooses any supported minimum expected Modified Mercalli Intensity from II
+   through VI at that point. VI is the highest configurable threshold; estimates above
+   VI still appear in alerts and naturally match a VI subscription.
+4. The subscription becomes active after all three settings are present.
 
 After a location is received, the location-sharing keyboard is removed. It is shown
 again only for first-time registration or an explicit `/location` command. Repeating
 `/start` with an existing location reports the current setup without showing the button.
 
 `/status` shows the active threshold, `/location` replaces the configured location,
+`/language` changes the notification language, `/intensity` changes the MMI threshold,
 and `/stop` disables alerts. Replacing a location pauses the subscription until a
-new minimum magnitude is supplied, so an incomplete configuration cannot send alerts.
+language and intensity are selected, so an incomplete configuration cannot send alerts.
+
+Existing magnitude-and-radius subscriptions remain active as legacy subscriptions until
+the user explicitly selects `/intensity`. There is no scientifically valid automatic
+mapping from an epicentral magnitude threshold to local MMI. Their language initially
+remains unset so `/start` asks them to choose `ru` or `en` without changing the legacy
+filter.
 
 ## Runtime
 
@@ -40,10 +50,27 @@ data.
 
 ## Matching and delivery
 
-PostGIS applies the fixed 1,000 km radius and minimum magnitude filter during ingestion.
-The exact distance from the configured point to the epicenter is added to the durable
-delivery payload. Telegram messages include magnitude, distance, depth, place, event
-time, and the provider details URL when those values are available.
+For each event, the service derives a conservative candidate radius from the event
+magnitude, depth, and the lowest supported MMI. PostGIS uses that dynamic radius only
+to bound the candidate query. The application then predicts MMI separately at every
+candidate subscriber point and notifies when the prediction's one-sigma upper bound
+reaches the subscriber threshold. A fixed user-facing radius is not used.
+
+The preliminary model is the hypocentral-distance form of Allen, Wald, and Worden
+(2012), versioned as `allen-et-al-2012-rhypo-v1`. It uses a 10 km auditable default when
+provider depth is absent and assumes active crust with average site response. Values
+outside the model's published magnitude or distance calibration are marked as
+extrapolated. This estimate is not an observed ground-motion measurement.
+
+Every candidate decision stores the event version, model name and version, magnitude,
+effective depth, epicentral and hypocentral distance, mean MMI, total sigma, bounds,
+threshold, assumptions, and decision. A later canonical earthquake version recomputes
+the estimate and edits an existing Telegram alert.
+
+Personal Telegram messages include magnitude, expected MMI and verbal severity, likely
+one-sigma MMI range, distance, depth, place, event time, and provider links. Text and the
+location callback button use the subscriber's `ru` or `en` language. The global channel
+has no subscriber location, so it does not display a local intensity estimate.
 
 An alert represents a canonical incident rather than a provider record. Its heading
 shows the current lifecycle state:
@@ -61,10 +88,10 @@ replace the text of that message with `editMessageText`. Rapid provider revision
 coalesced to the newest desired incident version. If the original message can no longer
 be edited, the service sends one linked correction and stores its new `message_id`.
 
-If a preliminary magnitude later falls below the subscription threshold or its
-epicenter moves outside the configured radius, the already delivered message is
-updated with the correction instead of silently disappearing. A later threshold
-crossing for an incident that was not previously delivered creates the first message.
+If a preliminary revision later produces a lower local estimate, the already delivered
+message is updated with the correction instead of silently disappearing. A later MMI
+threshold crossing for an incident that was not previously delivered creates the first
+message.
 
 The existing baseline, backfill, recovery, retry, and at-least-once rules also apply to
 Telegram. A material canonical revision that crosses the configured minimum magnitude

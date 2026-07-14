@@ -27,7 +27,7 @@ func integrationRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	t.Cleanup(repo.Pool.Close)
-	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE telegram_alert_messages,notification_deliveries,notification_subscriptions,
+	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE notification_intensity_evaluations,telegram_alert_messages,notification_deliveries,notification_subscriptions,
 		provider_observations,earthquake_source_associations,earthquake_revisions,earthquake_source_records,earthquakes,
 		ingestion_runs,provider_state CASCADE`)
 	if err != nil {
@@ -335,6 +335,65 @@ func TestTelegramSubscriptionCreatesDistanceAwareDelivery(t *testing.T) {
 	}
 	if payload.Sources["usgs"] != sourceURL {
 		t.Fatalf("sources=%v", payload.Sources)
+	}
+}
+
+func TestTelegramIntensitySubscriptionAuditsDecisionAndLocalizesPayload(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const notifiedChatID, quietChatID int64 = 43, 44
+
+	for _, configured := range []struct {
+		chatID    int64
+		threshold float64
+		longitude float64
+	}{{notifiedChatID, 6, 74.2}, {quietChatID, 6, 75.2}} {
+		if _, err := r.UpsertTelegramLocation(ctx, configured.chatID, 40.1, configured.longitude, 0, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.SetTelegramLanguage(ctx, configured.chatID, "ru", now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ActivateTelegramIntensity(ctx, configured.chatID, configured.threshold, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	event := testEvent("telegram-intensity", now, 5.0)
+	depth := 10.0
+	event.DepthKM = &depth
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "realtime", true, now); err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := r.ClaimTelegramAlertMessages(ctx, "telegram-worker", 10, 5*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].TelegramChatID != notifiedChatID {
+		t.Fatalf("alerts=%+v", alerts)
+	}
+	var payload struct {
+		Language *string `json:"language"`
+		Shaking  *struct {
+			MeanMMI  float64 `json:"mean_mmi"`
+			UpperMMI float64 `json:"upper_mmi"`
+		} `json:"shaking"`
+	}
+	if err := json.Unmarshal(alerts[0].DesiredPayload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Language == nil || *payload.Language != "ru" || payload.Shaking == nil || payload.Shaking.MeanMMI <= 0 || payload.Shaking.UpperMMI < 6 {
+		t.Fatalf("payload=%+v", payload)
+	}
+	var notifyDecisions, belowDecisions int
+	if err := r.Pool.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE decision='notify'),count(*) FILTER (WHERE decision='below_threshold')
+		FROM notification_intensity_evaluations`).Scan(&notifyDecisions, &belowDecisions); err != nil {
+		t.Fatal(err)
+	}
+	if notifyDecisions != 1 || belowDecisions != 1 {
+		t.Fatalf("notify=%d below=%d", notifyDecisions, belowDecisions)
 	}
 }
 

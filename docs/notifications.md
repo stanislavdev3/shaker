@@ -1,15 +1,21 @@
 # Notifications
 
 The implemented channels are signed webhooks and Telegram Bot API messages. Telegram
-subscriptions are configured by sharing a location with the bot and entering a minimum
-magnitude. The current Telegram product radius is fixed at 1,000 km; see
-[telegram.md](telegram.md).
+subscriptions are configured by sharing a location, choosing `ru` or `en`, and choosing
+a minimum expected Modified Mercalli Intensity at that location; see
+[telegram.md](telegram.md). Webhook subscriptions retain their existing magnitude and
+radius filters.
 
 ## Trigger and matching rules
 
 `new_event` applies only to an event first observed by normal realtime polling after baseline completion and within the subscription's maximum event age. Baseline, backfill, and recovery never create this trigger.
 
 `magnitude_threshold_crossed` applies when the previous magnitude was absent or below the subscription minimum and the new magnitude reaches or exceeds it. Remaining above the threshold does not retrigger.
+
+`intensity_threshold_crossed` is internal to personal Telegram delivery. It applies
+when a new event revision's one-sigma upper MMI estimate reaches the subscriber threshold
+after the previous estimate was below it. The central estimate and one-sigma range are
+included in the message; the conservative upper bound is used only for the decision.
 
 `tsunami_activated` applies only to a transition from false or absent to true. `alert_level_increased` uses `none < green < yellow < orange < red`.
 

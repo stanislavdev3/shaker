@@ -58,17 +58,41 @@ func TestTelegramMessage(t *testing.T) {
 		"type":"new_event",
 		"lifecycle":"preliminary",
 		"sources":{"usgs":"https://example.com/usgs"},
+		"language":"en",
+		"shaking":{"mean_mmi":4.2,"lower_mmi":3.3,"upper_mmi":5.1},
 		"earthquake":{"source":"emsc","magnitude":5.2,"depth_km":12.4,"distance_km":123.6,"latitude":42.8,"longitude":74.6,"place":"Test & region","occurred_at":"2026-07-13T10:00:00Z","detail_url":"https://example.com/emsc"}
 	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"🟡 Preliminary earthquake", "Magnitude: <b>5.2</b>", "Distance: 124 km", "Depth: 12.4 km", "Test &amp; region", `<tg-time unix="1783936800" format="wDt">`, `<a href="https://example.com/usgs">USGS</a> | <a href="https://example.com/emsc">EMSC</a>`} {
+	for _, expected := range []string{"🟡 Preliminary earthquake", "Magnitude: <b>5.2</b>", "Expected at your location: <b>IV — light</b>", "Likely range: III–V", "Distance: 124 km", "Depth: 12.4 km", "Test &amp; region", `<tg-time unix="1783936800" format="wDt">`, `<a href="https://example.com/usgs">USGS</a> | <a href="https://example.com/emsc">EMSC</a>`} {
 		if !strings.Contains(message.text, expected) {
 			t.Fatalf("message %q does not contain %q", message.text, expected)
 		}
 	}
 	if message.latitude == nil || message.longitude == nil || *message.latitude != 42.8 || *message.longitude != 74.6 {
 		t.Fatalf("coordinates=%v,%v", message.latitude, message.longitude)
+	}
+	if message.locationButton != "🗺 Show location" {
+		t.Fatalf("location button=%q", message.locationButton)
+	}
+}
+
+func TestTelegramMessageRussian(t *testing.T) {
+	message, err := telegramMessage([]byte(`{
+		"type":"new_event","lifecycle":"confirmed","language":"ru",
+		"shaking":{"mean_mmi":5.0,"lower_mmi":4.1,"upper_mmi":5.9},
+		"earthquake":{"magnitude":6.1,"distance_km":80}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"✅ Подтверждённое землетрясение", "Магнитуда: <b>6.1</b>", "Ожидается у вас: <b>V — умеренные</b>", "Вероятный диапазон: IV–VI", "Расстояние: 80 км"} {
+		if !strings.Contains(message.text, expected) {
+			t.Fatalf("message %q does not contain %q", message.text, expected)
+		}
+	}
+	if message.locationButton != "🗺 Показать место" {
+		t.Fatalf("location button=%q", message.locationButton)
 	}
 }

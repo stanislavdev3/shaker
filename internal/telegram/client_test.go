@@ -110,7 +110,7 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 		t.Fatal("remove_keyboard was not sent")
 	}
 	latitude, longitude := 42.8, 74.6
-	messageID, err := client.SendAlertMessage(context.Background(), 42, "<b>alert</b>", &latitude, &longitude)
+	messageID, err := client.SendAlertMessage(context.Background(), 42, "<b>alert</b>", &latitude, &longitude, "🗺 Show location")
 	if err != nil || messageID != 99 {
 		t.Fatalf("messageID=%d err=%v", messageID, err)
 	}
@@ -126,7 +126,7 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 	if answeredCallbackID != "callback-1" || locationReplyID != messageID {
 		t.Fatalf("answered callback=%q location reply=%d", answeredCallbackID, locationReplyID)
 	}
-	if err := client.EditAlertMessage(context.Background(), 42, messageID, "updated", &latitude, &longitude); err != nil {
+	if err := client.EditAlertMessage(context.Background(), 42, messageID, "updated", &latitude, &longitude, "🗺 Show location"); err != nil {
 		t.Fatal(err)
 	}
 	if editedMessageID != 99 {
@@ -148,7 +148,7 @@ func TestClientGetUpdatesAndSendMessage(t *testing.T) {
 
 func TestAlertLocationKeyboardIsPrivateOnly(t *testing.T) {
 	latitude, longitude := 42.8, 74.6
-	if alertLocationKeyboard(-10042, &latitude, &longitude) != nil {
+	if alertLocationKeyboard(-10042, &latitude, &longitude, "") != nil {
 		t.Fatal("channel alert must not have a location button")
 	}
 }
@@ -160,7 +160,7 @@ func TestClientPreservesTelegramRetryAfter(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewClient(server.URL, "test", time.Second, 1024)
-	_, err := client.SendAlertMessage(context.Background(), 42, "alert", nil, nil)
+	_, err := client.SendAlertMessage(context.Background(), 42, "alert", nil, nil, "")
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.RetryAfter() != 17*time.Second {
 		t.Fatalf("error=%v", err)

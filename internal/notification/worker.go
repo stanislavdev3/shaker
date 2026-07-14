@@ -36,8 +36,8 @@ type Worker struct {
 }
 
 type TelegramSender interface {
-	SendAlertMessage(context.Context, int64, string, *float64, *float64) (int64, error)
-	EditAlertMessage(context.Context, int64, int64, string, *float64, *float64) error
+	SendAlertMessage(context.Context, int64, string, *float64, *float64, string) (int64, error)
+	EditAlertMessage(context.Context, int64, int64, string, *float64, *float64, string) error
 }
 
 func NewWorker(repo *postgres.Repository, cipher *Cipher, c clock.Clock, log *slog.Logger, id, userAgent string, batch, maxAttempts int, lockTimeout, poll, httpTimeout time.Duration, maxResponse int64, allowPrivate bool, telegram TelegramSender) *Worker {
@@ -89,14 +89,14 @@ func (w *Worker) deliverTelegramAlert(ctx context.Context, alert postgres.Telegr
 	messageID := int64(0)
 	if err == nil {
 		if alert.TelegramMessageID == nil {
-			messageID, err = w.telegram.SendAlertMessage(ctx, alert.TelegramChatID, message.text, message.latitude, message.longitude)
+			messageID, err = w.telegram.SendAlertMessage(ctx, alert.TelegramChatID, message.text, message.latitude, message.longitude, message.locationButton)
 			if err != nil && messageID > 0 {
 				w.log.Warn("send Telegram alert location", "telegram_alert_id", alert.ID, "error", err)
 				err = nil
 			}
 		} else {
 			messageID = *alert.TelegramMessageID
-			err = w.telegram.EditAlertMessage(ctx, alert.TelegramChatID, messageID, message.text, message.latitude, message.longitude)
+			err = w.telegram.EditAlertMessage(ctx, alert.TelegramChatID, messageID, message.text, message.latitude, message.longitude, message.locationButton)
 		}
 	}
 	if err == nil {
@@ -151,7 +151,7 @@ func (w *Worker) send(ctx context.Context, d postgres.Delivery, now time.Time) (
 		if err != nil {
 			return nil, 0, err
 		}
-		messageID, sendErr := w.telegram.SendAlertMessage(ctx, *d.TelegramChatID, message.text, message.latitude, message.longitude)
+		messageID, sendErr := w.telegram.SendAlertMessage(ctx, *d.TelegramChatID, message.text, message.latitude, message.longitude, message.locationButton)
 		if sendErr != nil && messageID > 0 {
 			w.log.Warn("send Telegram delivery location", "delivery_id", d.ID, "error", sendErr)
 			return nil, 0, nil
@@ -218,13 +218,20 @@ func (w *Worker) send(ctx context.Context, d postgres.Delivery, now time.Time) (
 type formattedTelegramMessage struct {
 	text                string
 	latitude, longitude *float64
+	locationButton      string
 }
 
 func telegramMessage(payload []byte) (formattedTelegramMessage, error) {
 	var delivery struct {
-		Type       string            `json:"type"`
-		Lifecycle  string            `json:"lifecycle"`
-		Sources    map[string]string `json:"sources"`
+		Type      string            `json:"type"`
+		Lifecycle string            `json:"lifecycle"`
+		Sources   map[string]string `json:"sources"`
+		Language  *string           `json:"language"`
+		Shaking   *struct {
+			MeanMMI  float64 `json:"mean_mmi"`
+			LowerMMI float64 `json:"lower_mmi"`
+			UpperMMI float64 `json:"upper_mmi"`
+		} `json:"shaking"`
 		Earthquake struct {
 			Source     string    `json:"source"`
 			Magnitude  *float64  `json:"magnitude"`
@@ -241,42 +248,68 @@ func telegramMessage(payload []byte) (formattedTelegramMessage, error) {
 	if err := json.Unmarshal(payload, &delivery); err != nil {
 		return formattedTelegramMessage{}, fmt.Errorf("decode Telegram delivery: %w", err)
 	}
+	language := "en"
+	if delivery.Language != nil && *delivery.Language == "ru" {
+		language = "ru"
+	}
 	title := map[string]string{
 		"new_event":                   "Earthquake detected",
 		"magnitude_threshold_crossed": "Earthquake magnitude increased",
+		"intensity_threshold_crossed": "Expected shaking intensity increased",
 		"tsunami_activated":           "Tsunami alert activated",
 		"alert_level_increased":       "Earthquake alert level increased",
 	}[delivery.Type]
 	if title == "" {
 		title = "Earthquake update"
 	}
+	if language == "ru" {
+		title = map[string]string{
+			"new_event":                   "Обнаружено землетрясение",
+			"magnitude_threshold_crossed": "Магнитуда землетрясения увеличилась",
+			"intensity_threshold_crossed": "Ожидаемая интенсивность толчков увеличилась",
+			"tsunami_activated":           "Объявлена угроза цунами",
+			"alert_level_increased":       "Уровень опасности землетрясения повышен",
+		}[delivery.Type]
+		if title == "" {
+			title = "Обновление данных о землетрясении"
+		}
+	}
 	switch delivery.Lifecycle {
 	case "preliminary":
-		title = "🟡 Preliminary earthquake — details are being refined"
+		title = localized(language, "🟡 Preliminary earthquake — details are being refined", "🟡 Предварительное землетрясение — данные уточняются")
 	case "confirmed":
-		title = "✅ Confirmed earthquake"
+		title = localized(language, "✅ Confirmed earthquake", "✅ Подтверждённое землетрясение")
 	case "reviewed":
-		title = "🔵 Reviewed earthquake"
+		title = localized(language, "🔵 Reviewed earthquake", "🔵 Проверенное землетрясение")
 	case "retracted":
-		title = "❌ Retracted event"
+		title = localized(language, "❌ Retracted event", "❌ Событие отозвано")
 	}
 	lines := []string{title}
 	if delivery.Earthquake.Magnitude != nil {
-		lines = append(lines, fmt.Sprintf("Magnitude: <b>%.1f</b>", *delivery.Earthquake.Magnitude))
+		lines = append(lines, fmt.Sprintf("%s: <b>%.1f</b>", localized(language, "Magnitude", "Магнитуда"), *delivery.Earthquake.Magnitude))
+	}
+	if delivery.Shaking != nil {
+		mean := romanIntensity(delivery.Shaking.MeanMMI)
+		description := intensityDescription(language, delivery.Shaking.MeanMMI)
+		lines = append(lines, fmt.Sprintf("%s: <b>%s — %s</b>",
+			localized(language, "Expected at your location", "Ожидается у вас"), mean, description))
+		lines = append(lines, fmt.Sprintf("%s: %s–%s",
+			localized(language, "Likely range", "Вероятный диапазон"),
+			romanIntensity(delivery.Shaking.LowerMMI), romanIntensity(delivery.Shaking.UpperMMI)))
 	}
 	if delivery.Earthquake.DistanceKM != nil {
-		lines = append(lines, fmt.Sprintf("Distance: %.0f km", *delivery.Earthquake.DistanceKM))
+		lines = append(lines, fmt.Sprintf("%s: %.0f %s", localized(language, "Distance", "Расстояние"), *delivery.Earthquake.DistanceKM, localized(language, "km", "км")))
 	}
 	if delivery.Earthquake.DepthKM != nil {
-		lines = append(lines, fmt.Sprintf("Depth: %.1f km", *delivery.Earthquake.DepthKM))
+		lines = append(lines, fmt.Sprintf("%s: %.1f %s", localized(language, "Depth", "Глубина"), *delivery.Earthquake.DepthKM, localized(language, "km", "км")))
 	}
 	if delivery.Earthquake.Place != nil && *delivery.Earthquake.Place != "" {
-		lines = append(lines, "Location: "+html.EscapeString(*delivery.Earthquake.Place))
+		lines = append(lines, localized(language, "Location", "Место")+": "+html.EscapeString(*delivery.Earthquake.Place))
 	}
 	if !delivery.Earthquake.OccurredAt.IsZero() {
 		occurredAt := delivery.Earthquake.OccurredAt.UTC()
 		fallback := occurredAt.Format("2006-01-02 15:04 UTC")
-		lines = append(lines, fmt.Sprintf("Time: <tg-time unix=\"%d\" format=\"wDt\">%s</tg-time>", occurredAt.Unix(), fallback))
+		lines = append(lines, fmt.Sprintf("%s: <tg-time unix=\"%d\" format=\"wDt\">%s</tg-time>", localized(language, "Time", "Время"), occurredAt.Unix(), fallback))
 	}
 	detailsURL := delivery.Earthquake.SourceURL
 	if detailsURL == nil || *detailsURL == "" {
@@ -289,12 +322,42 @@ func telegramMessage(payload []byte) (formattedTelegramMessage, error) {
 		delivery.Sources[delivery.Earthquake.Source] = *detailsURL
 	}
 	lines = append(lines, telegramSourceLabel("USGS", delivery.Sources["usgs"])+" | "+telegramSourceLabel("EMSC", delivery.Sources["emsc"]))
-	message := formattedTelegramMessage{text: strings.Join(lines, "\n")}
+	message := formattedTelegramMessage{text: strings.Join(lines, "\n"), locationButton: localized(language, "🗺 Show location", "🗺 Показать место")}
 	if validTelegramCoordinates(delivery.Earthquake.Latitude, delivery.Earthquake.Longitude) {
 		message.latitude = delivery.Earthquake.Latitude
 		message.longitude = delivery.Earthquake.Longitude
 	}
 	return message, nil
+}
+
+func localized(language, english, russian string) string {
+	if language == "ru" {
+		return russian
+	}
+	return english
+}
+
+func romanIntensity(value float64) string {
+	values := []string{"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+	index := int(math.Round(value)) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(values) {
+		index = len(values) - 1
+	}
+	return values[index]
+}
+
+func intensityDescription(language string, value float64) string {
+	english := []string{"not felt", "very weak", "weak", "light", "moderate", "strong", "very strong", "severe", "violent", "extreme"}
+	russian := []string{"не ощущаются", "очень слабые", "слабые", "лёгкие", "умеренные", "сильные", "очень сильные", "разрушительные", "опустошительные", "экстремальные"}
+	index := int(math.Round(value)) - 1
+	index = max(0, min(index, len(english)-1))
+	if language == "ru" {
+		return russian[index]
+	}
+	return english[index]
 }
 
 func telegramSourceLabel(label, link string) string {

@@ -99,7 +99,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 	return c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, nil)
 }
 
-func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string, latitude, longitude *float64) (int64, error) {
+func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string, latitude, longitude *float64, locationButton string) (int64, error) {
 	var response struct {
 		Result Message `json:"result"`
 	}
@@ -107,7 +107,7 @@ func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string
 		"chat_id": chatID, "text": text, "parse_mode": "HTML",
 		"link_preview_options": map[string]any{"is_disabled": true},
 	}
-	if keyboard := alertLocationKeyboard(chatID, latitude, longitude); keyboard != nil {
+	if keyboard := alertLocationKeyboard(chatID, latitude, longitude, locationButton); keyboard != nil {
 		request["reply_markup"] = keyboard
 	}
 	err := c.call(ctx, "sendMessage", request, &response)
@@ -120,12 +120,15 @@ func (c *Client) SendAlertMessage(ctx context.Context, chatID int64, text string
 	return response.Result.ID, nil
 }
 
-func alertLocationKeyboard(chatID int64, latitude, longitude *float64) any {
+func alertLocationKeyboard(chatID int64, latitude, longitude *float64, label string) any {
 	if chatID <= 0 || latitude == nil || longitude == nil {
 		return nil
 	}
+	if label == "" {
+		label = "🗺 Show location"
+	}
 	return map[string]any{"inline_keyboard": [][]map[string]any{{{
-		"text": "🗺 Show location", "callback_data": fmt.Sprintf("loc:%.6f:%.6f", *latitude, *longitude),
+		"text": label, "callback_data": fmt.Sprintf("loc:%.6f:%.6f", *latitude, *longitude),
 	}}}}
 }
 
@@ -144,12 +147,12 @@ func (c *Client) SendLocation(ctx context.Context, chatID, replyToMessageID int6
 	}, nil)
 }
 
-func (c *Client) EditAlertMessage(ctx context.Context, chatID, messageID int64, text string, latitude, longitude *float64) error {
+func (c *Client) EditAlertMessage(ctx context.Context, chatID, messageID int64, text string, latitude, longitude *float64, locationButton string) error {
 	request := map[string]any{
 		"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML",
 		"link_preview_options": map[string]any{"is_disabled": true},
 	}
-	if keyboard := alertLocationKeyboard(chatID, latitude, longitude); keyboard != nil {
+	if keyboard := alertLocationKeyboard(chatID, latitude, longitude, locationButton); keyboard != nil {
 		request["reply_markup"] = keyboard
 	}
 	err := c.call(ctx, "editMessageText", request, nil)
@@ -197,6 +200,26 @@ func (c *Client) RequestLocation(ctx context.Context, chatID int64, text string)
 		"text":    text,
 		"reply_markup": map[string]any{
 			"keyboard":          [][]map[string]any{{{"text": "Share location", "request_location": true}}},
+			"resize_keyboard":   true,
+			"one_time_keyboard": true,
+		},
+	}, nil)
+}
+
+func (c *Client) RequestChoice(ctx context.Context, chatID int64, text string, choices []string) error {
+	buttons := make([][]map[string]any, 0, (len(choices)+1)/2)
+	for i := 0; i < len(choices); i += 2 {
+		row := []map[string]any{{"text": choices[i]}}
+		if i+1 < len(choices) {
+			row = append(row, map[string]any{"text": choices[i+1]})
+		}
+		buttons = append(buttons, row)
+	}
+	return c.call(ctx, "sendMessage", map[string]any{
+		"chat_id": chatID,
+		"text":    text,
+		"reply_markup": map[string]any{
+			"keyboard":          buttons,
 			"resize_keyboard":   true,
 			"one_time_keyboard": true,
 		},
