@@ -108,8 +108,37 @@ func (r *Repository) AdminIncident(ctx context.Context, id uuid.UUID) (administr
 	if detail.Evaluations, err = r.adminEvaluations(ctx, id); err != nil {
 		return detail, err
 	}
+	if detail.MatchingAudits, err = r.adminMatchingAudits(ctx, id); err != nil {
+		return detail, err
+	}
 	detail.Revisions, err = r.adminRevisions(ctx, id)
 	return detail, err
+}
+
+func (r *Repository) adminMatchingAudits(ctx context.Context, id uuid.UUID) ([]administration.NotificationMatchingAudit, error) {
+	rows, err := r.Pool.Query(ctx, `SELECT id,earthquake_id,earthquake_version,mode,baseline_complete,model_version,
+		decision_policy_version,candidate_minimum_mmi,candidate_radius_km,
+		selected_subscription_count,intensity_candidate_count,intensity_evaluation_count,
+		notify_decision_count,below_threshold_count,estimate_error_count,trigger_count,created_at
+		FROM notification_matching_audits WHERE earthquake_id=$1 ORDER BY created_at DESC LIMIT 100`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []administration.NotificationMatchingAudit
+	for rows.Next() {
+		var item administration.NotificationMatchingAudit
+		if err := rows.Scan(&item.ID, &item.EarthquakeID, &item.EarthquakeVersion, &item.Mode,
+			&item.BaselineComplete, &item.ModelVersion, &item.DecisionPolicyVersion,
+			&item.CandidateMinimumMMI, &item.CandidateRadiusKM,
+			&item.SelectedSubscriptionCount, &item.IntensityCandidateCount, &item.IntensityEvaluationCount,
+			&item.NotifyDecisionCount, &item.BelowThresholdCount, &item.EstimateErrorCount,
+			&item.TriggerCount, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 const adminIncidentSelect = `SELECT id,preferred_source,preferred_external_id,occurred_at,source_updated_at,latitude,
@@ -189,7 +218,7 @@ func (r *Repository) adminAssociations(ctx context.Context, id uuid.UUID) ([]adm
 
 func (r *Repository) adminEvaluations(ctx context.Context, id uuid.UUID) ([]administration.IntensityEvaluation, error) {
 	rows, err := r.Pool.Query(ctx, `SELECT id,subscription_id,earthquake_version,model_name,model_version,decision,
-		mean_mmi,sigma_mmi,lower_mmi,upper_mmi,threshold_mmi,epicentral_distance_km,
+		decision_policy_version,mean_mmi,sigma_mmi,lower_mmi,upper_mmi,threshold_mmi,decision_boundary_mmi,epicentral_distance_km,
 		hypocentral_distance_km,magnitude,depth_km,created_at FROM notification_intensity_evaluations
 		WHERE earthquake_id=$1 ORDER BY created_at DESC LIMIT 200`, id)
 	if err != nil {
@@ -200,8 +229,8 @@ func (r *Repository) adminEvaluations(ctx context.Context, id uuid.UUID) ([]admi
 	for rows.Next() {
 		var item administration.IntensityEvaluation
 		if err := rows.Scan(&item.ID, &item.SubscriptionID, &item.EarthquakeVersion, &item.ModelName,
-			&item.ModelVersion, &item.Decision, &item.MeanMMI, &item.SigmaMMI, &item.LowerMMI,
-			&item.UpperMMI, &item.ThresholdMMI, &item.EpicentralDistanceKM, &item.HypocentralDistanceKM,
+			&item.ModelVersion, &item.Decision, &item.DecisionPolicyVersion, &item.MeanMMI, &item.SigmaMMI, &item.LowerMMI,
+			&item.UpperMMI, &item.ThresholdMMI, &item.DecisionBoundaryMMI, &item.EpicentralDistanceKM, &item.HypocentralDistanceKM,
 			&item.Magnitude, &item.DepthKM, &item.CreatedAt); err != nil {
 			return nil, err
 		}

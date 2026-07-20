@@ -63,6 +63,45 @@ func TestCorrelationPolicyRejectsAmbiguousCandidates(t *testing.T) {
 	}
 }
 
+func TestProductionCorrelationPolicyMatchesObservedEMSCUSGSDuplicate(t *testing.T) {
+	policy := ProductionCorrelationPolicy()
+	now := time.Date(2026, 7, 19, 20, 41, 6, 0, time.UTC)
+	emsc := correlationEvent("emsc", now.Add(1079*time.Millisecond), 42.1, 74.2, 4.2, 12)
+	usgs := correlationEvent("usgs", now, 42.14245, 74.2, 4.1, 14.057)
+	id := uuid.New()
+	decision := policy.Correlate(usgs, []CorrelationCandidate{{IncidentID: id, Event: emsc}})
+	if decision.Match == nil || decision.Match.IncidentID != id || decision.Match.Score < policy.AcceptanceThreshold {
+		t.Fatalf("decision=%+v", decision)
+	}
+	if decision.Match.TimeDeltaSeconds < 1 || decision.Match.DistanceKM < 4 {
+		t.Fatalf("evidence=%+v", decision.Match)
+	}
+}
+
+func TestProductionCorrelationPolicyRejectsPlausibleNearbyAftershock(t *testing.T) {
+	policy := ProductionCorrelationPolicy()
+	now := time.Now().UTC()
+	incoming := correlationEvent("usgs", now, 42, 74, 4.1, 12)
+	decision := policy.Correlate(incoming, []CorrelationCandidate{{
+		IncidentID: uuid.New(), Event: correlationEvent("emsc", now.Add(-20*time.Second), 42.12, 74, 4.2, 15),
+	}})
+	if decision.Match != nil {
+		t.Fatalf("unsafe match=%+v", decision.Match)
+	}
+}
+
+func TestCanonicalSourcePreference(t *testing.T) {
+	if !PreferCanonicalSource("emsc", PreliminarySolution, "usgs", ConfirmedSolution) {
+		t.Fatal("confirmed USGS should replace preliminary EMSC")
+	}
+	if PreferCanonicalSource("usgs", ConfirmedSolution, "emsc", PreliminarySolution) {
+		t.Fatal("preliminary EMSC should not replace confirmed USGS")
+	}
+	if !PreferCanonicalSource("emsc", ConfirmedSolution, "usgs", ConfirmedSolution) {
+		t.Fatal("USGS should win the stable equal-class provider tie-break")
+	}
+}
+
 func testCorrelationPolicy() CorrelationPolicy {
 	return CorrelationPolicy{
 		Version: "test-v1", MaximumTimeDelta: 2 * time.Minute,

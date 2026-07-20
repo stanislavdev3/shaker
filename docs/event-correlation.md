@@ -8,18 +8,17 @@ association history is seeded for existing records, and Telegram alert projectio
 persist a remote `message_id` and desired/delivered incident versions. USGS observations
 are classified as confirmed, reviewed, or retracted from their provider status.
 
-The correlation scorer is implemented as a pure domain policy but automatic heuristic
-association is intentionally not enabled until paired EMSC and USGS replay fixtures
-have been used to calibrate its gates and acceptance thresholds. Telegram delivery is
-connected to the message projection: the initial send persists `message_id`, and later
-canonical versions converge through `editMessageText` for private alerts and the
-configured global channel.
+The correlation scorer and automatic EMSC-to-USGS association are enabled through the
+versioned `emsc-usgs-conservative-v1` policy. The policy was replayed against the
+production catalogue before activation. Telegram delivery is connected to the message
+projection: the initial send persists `message_id`, and later canonical versions
+converge through `editMessageText` for private alerts and the configured global channel.
 
-EMSC standing-order WebSocket and FDSN adapters are now implemented. They share the
-authoritative EMSC `unid`, so an FDSN observation confirms and updates the preliminary
-incident produced by the WebSocket. Cross-provider EMSC-to-USGS heuristic association
-is still intentionally disabled pending replay calibration. See `docs/emsc.md` for the
-runtime and rollout controls.
+EMSC standing-order WebSocket and FDSN adapters share the authoritative EMSC `unid`, so
+an FDSN observation confirms and updates the preliminary incident produced by the
+WebSocket. A previously unseen EMSC or USGS identity may additionally associate with an
+incident from the other provider when the conservative policy produces one unambiguous
+high-confidence match. See `docs/emsc.md` for runtime details.
 
 ## Data model
 
@@ -73,11 +72,20 @@ Correlation follows this order:
    be reconciled after authoritative identity evidence arrives or by a future admin
    workflow.
 
-The candidate gates, weights, acceptance threshold, and ambiguity margin are a named,
-versioned policy. They must be calibrated against replayed historical EMSC and USGS
-fixtures before production activation. Changes to the policy apply prospectively;
-bulk reassociation is a separate audited operation. The system prefers a temporary
-duplicate over merging two nearby earthquakes.
+The active policy searches by provider origin time, not ingestion or notification time.
+It allows 30 seconds, 25 km, a 0.5 magnitude difference, and a 30 km depth difference;
+the weighted score must reach 0.82 and exceed the runner-up by at least 0.08. Magnitude
+is required for heuristic association. The gates, weights, acceptance threshold, and
+ambiguity margin are named and versioned. Changes apply prospectively; bulk
+reassociation is a separate audited operation. The system prefers a temporary duplicate
+over merging two nearby earthquakes.
+
+The activation replay covered 8,633 production incidents: 2,925 EMSC and 5,708 USGS.
+Of 545 mutual nearest candidates inside a broad one-hour, 50 km, and 0.7 magnitude
+analysis window, 537 had origin-time deltas within 30 seconds; p95 was 3.5 seconds and
+the longest plausible close pair was 18.22 seconds. The eight candidates beyond 30
+seconds had 4–56 minute origin deltas and appeared to be distinct nearby earthquakes.
+Provider arrival delay can exceed 30 minutes and is deliberately not used as a gate.
 
 ## Canonical field selection
 
@@ -135,8 +143,9 @@ alerting threshold.
 1. Introduce provider observations, canonical incidents, audited associations, and
    lifecycle revisions without changing the public API response shape.
 2. Implement and replay-test the correlation policy against paired historical EMSC and
-   USGS fixtures. Enable automatic heuristic association only after measuring false
-   merge and false split rates.
+   USGS fixtures, then activate the conservative versioned policy. Completed for
+   `emsc-usgs-conservative-v1`; continued false-merge and false-split monitoring remains
+   required.
 3. Add EMSC FDSN ingestion and recovery, then the bounded reconnecting WebSocket client.
 4. Add Telegram alert projections, capture `message_id` from `sendMessage`, and support
    `editMessageText` with coalescing and retry.

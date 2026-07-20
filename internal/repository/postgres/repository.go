@@ -149,7 +149,7 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 	var sourceVersion int64
 	var oldChannel string
 	var oldSolution earthquake.SolutionClass
-	err := tx.QueryRow(ctx, `SELECT e.id,e.occurred_at,e.source_updated_at,e.latitude,e.longitude,e.depth_km,e.magnitude,
+	err := tx.QueryRow(ctx, `SELECT e.id,e.preferred_source,e.preferred_external_id,e.occurred_at,e.source_updated_at,e.latitude,e.longitude,e.depth_km,e.magnitude,
 		e.magnitude_type,e.place,e.title,e.status,e.event_type,e.alert_level,e.tsunami,e.significance,e.felt_reports,
 		e.cdi,e.mmi,e.station_count,e.azimuthal_gap,e.minimum_distance,e.rms,e.source_url,e.detail_url,e.version,
 		e.first_seen_at,e.last_seen_at,e.created_at,e.updated_at,e.lifecycle,s.id,s.payload_hash,s.version,
@@ -164,6 +164,13 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 	channel := incoming.EffectiveObservationChannel()
 	solution := incoming.EffectiveSolutionClass()
 	if errors.Is(err, pgx.ErrNoRows) {
+		decision, decisionErr := correlationDecision(ctx, tx, incoming)
+		if decisionErr != nil {
+			return earthquake.Change{}, decisionErr
+		}
+		if decision.Match != nil {
+			return insertCorrelatedSource(ctx, tx, incoming, hash[:], channel, solution, decision, now)
+		}
 		incoming.Lifecycle = earthquake.ResolveLifecycle([]earthquake.SolutionClass{solution})
 		provenance := canonicalProvenance(incoming, 1)
 		err = tx.QueryRow(ctx, `INSERT INTO earthquakes(id,preferred_source,preferred_external_id,occurred_at,source_updated_at,
@@ -197,10 +204,22 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 		if err := insertProviderObservation(ctx, tx, sourceID, 1, channel, solution, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, now); err != nil {
 			return earthquake.Change{}, err
 		}
+		associationAlgorithm := "identity-v1"
+		associationEvidence := json.RawMessage(`{"reason":"first provider identity"}`)
+		if len(decision.Ranked) > 0 {
+			associationAlgorithm = earthquake.ProductionCorrelationPolicy().Version
+			outcome := "below_acceptance_threshold"
+			if decision.Ambiguous {
+				outcome = "ambiguous_candidates"
+			}
+			associationEvidence, _ = json.Marshal(map[string]any{
+				"reason": outcome, "ranked": decision.Ranked,
+			})
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO earthquake_source_associations(id,source_record_id,earthquake_id,method,
 			confidence,algorithm_version,evidence,active,associated_at)
-			VALUES(gen_random_uuid(),$1,$2,'new_incident',1,'identity-v1',$3,TRUE,$4)`,
-			sourceID, incoming.ID, json.RawMessage(`{"reason":"first provider identity"}`), now)
+			VALUES(gen_random_uuid(),$1,$2,'new_incident',1,$3,$4,TRUE,$5)`,
+			sourceID, incoming.ID, associationAlgorithm, associationEvidence, now)
 		if err != nil {
 			return earthquake.Change{}, err
 		}
@@ -214,8 +233,6 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 	if err != nil {
 		return earthquake.Change{}, err
 	}
-	existing.Provider = incoming.Provider
-	existing.ExternalID = incoming.ExternalID
 	if incoming.SourceUpdatedAt.Before(existing.SourceUpdatedAt) {
 		if err := insertProviderObservation(ctx, tx, sourceID, sourceVersion, channel, solution, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, now); err != nil {
 			return earthquake.Change{}, err
@@ -271,6 +288,21 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 	if err := insertProviderObservation(ctx, tx, sourceID, sourceVersion, channel, solution, incoming.SourceUpdatedAt, hash[:], incoming.RawPayload, now); err != nil {
 		return earthquake.Change{}, err
 	}
+	if existing.Provider != incoming.Provider || existing.ExternalID != incoming.ExternalID {
+		preferredSolution, preferredErr := incidentPreferredSolution(ctx, tx, existing.ID)
+		if preferredErr != nil {
+			return earthquake.Change{}, preferredErr
+		}
+		if !earthquake.PreferCanonicalSource(existing.Provider, preferredSolution, incoming.Provider, solution) {
+			return applyLifecycleChange(ctx, tx, existing, sourceID, incoming, now, earthquake.Updated)
+		}
+	}
+	return updateCanonicalFromSource(ctx, tx, existing, incoming, sourceID, sourceVersion, now, nil)
+}
+
+func updateCanonicalFromSource(ctx context.Context, tx pgx.Tx, existing, incoming earthquake.Event,
+	sourceID uuid.UUID, sourceVersion int64, now time.Time, additionalChanged map[string]any) (earthquake.Change, error) {
+	var err error
 	incoming.ID = existing.ID
 	incoming.Version = existing.Version + 1
 	incoming.FirstSeenAt = existing.FirstSeenAt
@@ -282,16 +314,21 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 		return earthquake.Change{}, err
 	}
 	changed := changedFields(existing, incoming)
+	for key, value := range additionalChanged {
+		changed[key] = value
+	}
 	if existing.Lifecycle != incoming.Lifecycle {
 		changed["lifecycle"] = map[string]any{"from": existing.Lifecycle, "to": incoming.Lifecycle}
 	}
 	changedJSON, _ := json.Marshal(changed)
 	provenance := canonicalProvenance(incoming, sourceVersion)
-	_, err = tx.Exec(ctx, `UPDATE earthquakes SET occurred_at=$2,source_updated_at=$3,latitude=$4,longitude=$5,depth_km=$6,
-		location=ST_SetSRID(ST_MakePoint($5,$4),4326)::geography,magnitude=$7,magnitude_type=$8,place=$9,title=$10,
-		status=$11,event_type=$12,alert_level=$13,tsunami=$14,significance=$15,felt_reports=$16,cdi=$17,mmi=$18,
-		station_count=$19,azimuthal_gap=$20,minimum_distance=$21,rms=$22,source_url=$23,detail_url=$24,version=$25,
-		last_seen_at=$26,updated_at=$26,lifecycle=$27,canonical_provenance=$28 WHERE id=$1`, incoming.ID, incoming.OccurredAt, incoming.SourceUpdatedAt, incoming.Latitude,
+	_, err = tx.Exec(ctx, `UPDATE earthquakes SET preferred_source=$2,preferred_external_id=$3,
+		occurred_at=$4,source_updated_at=$5,latitude=$6,longitude=$7,depth_km=$8,
+		location=ST_SetSRID(ST_MakePoint($7,$6),4326)::geography,magnitude=$9,magnitude_type=$10,place=$11,title=$12,
+		status=$13,event_type=$14,alert_level=$15,tsunami=$16,significance=$17,felt_reports=$18,cdi=$19,mmi=$20,
+		station_count=$21,azimuthal_gap=$22,minimum_distance=$23,rms=$24,source_url=$25,detail_url=$26,version=$27,
+		last_seen_at=$28,updated_at=$28,lifecycle=$29,canonical_provenance=$30 WHERE id=$1`, incoming.ID,
+		incoming.Provider, incoming.ExternalID, incoming.OccurredAt, incoming.SourceUpdatedAt, incoming.Latitude,
 		incoming.Longitude, incoming.DepthKM, incoming.Magnitude, incoming.MagnitudeType, incoming.Place, incoming.Title, incoming.Status,
 		incoming.EventType, incoming.AlertLevel, incoming.Tsunami, incoming.Significance, incoming.FeltReports, incoming.CDI, incoming.MMI,
 		incoming.StationCount, incoming.AzimuthalGap, incoming.MinimumDistance, incoming.RMS, incoming.SourceURL, incoming.DetailURL,
@@ -305,8 +342,168 @@ func applyEvent(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, now t
 	return earthquake.Change{Kind: earthquake.Updated, Previous: &existing, Current: incoming, ChangedFields: changed, SourceRecordID: sourceID}, err
 }
 
+func correlationDecision(ctx context.Context, tx pgx.Tx, incoming earthquake.Event) (earthquake.CorrelationDecision, error) {
+	if (incoming.Provider != "emsc" && incoming.Provider != "usgs") || incoming.Magnitude == nil {
+		return earthquake.CorrelationDecision{}, nil
+	}
+	// Serialize creation of previously unseen cross-provider identities. The lock
+	// is held only by the current ingestion transaction and prevents symmetric
+	// EMSC/USGS arrivals from creating two incidents concurrently.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2084096761)`); err != nil {
+		return earthquake.CorrelationDecision{}, err
+	}
+	policy := earthquake.ProductionCorrelationPolicy()
+	rows, err := tx.Query(ctx, `SELECT e.id,e.preferred_source,e.occurred_at,e.latitude,e.longitude,e.magnitude,e.depth_km
+		FROM earthquakes e
+		WHERE e.occurred_at BETWEEN $1::timestamptz-$2::interval AND $1::timestamptz+$2::interval
+			AND e.magnitude IS NOT NULL
+			AND ST_DWithin(e.location,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5)
+			AND EXISTS (
+				SELECT 1 FROM earthquake_source_associations a
+				JOIN earthquake_source_records s ON s.id=a.source_record_id
+				WHERE a.earthquake_id=e.id AND a.active AND s.provider IN ('emsc','usgs') AND s.provider<>$6
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM earthquake_source_associations a
+				JOIN earthquake_source_records s ON s.id=a.source_record_id
+				WHERE a.earthquake_id=e.id AND a.active AND s.provider=$6
+			)
+		ORDER BY abs(EXTRACT(EPOCH FROM e.occurred_at-$1)),e.id
+		LIMIT 100 FOR UPDATE OF e`, incoming.OccurredAt, policy.MaximumTimeDelta.String(), incoming.Longitude,
+		incoming.Latitude, policy.MaximumDistanceKM*1000, incoming.Provider)
+	if err != nil {
+		return earthquake.CorrelationDecision{}, err
+	}
+	defer rows.Close()
+	var candidates []earthquake.CorrelationCandidate
+	for rows.Next() {
+		var candidate earthquake.CorrelationCandidate
+		if err := rows.Scan(&candidate.IncidentID, &candidate.Event.Provider, &candidate.Event.OccurredAt,
+			&candidate.Event.Latitude, &candidate.Event.Longitude, &candidate.Event.Magnitude,
+			&candidate.Event.DepthKM); err != nil {
+			return earthquake.CorrelationDecision{}, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return earthquake.CorrelationDecision{}, err
+	}
+	decision := policy.Correlate(incoming, candidates)
+	if len(candidates) == 100 {
+		decision.Match = nil
+		decision.Ambiguous = true
+	}
+	return decision, nil
+}
+
+func insertCorrelatedSource(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, hash []byte,
+	channel string, solution earthquake.SolutionClass, decision earthquake.CorrelationDecision,
+	now time.Time) (earthquake.Change, error) {
+	policy := earthquake.ProductionCorrelationPolicy()
+	match := decision.Match
+	if match == nil {
+		return earthquake.Change{}, errors.New("correlated source requires a match")
+	}
+	existing, preferredSolution, err := loadIncidentWithPreferredSource(ctx, tx, match.IncidentID)
+	if err != nil {
+		return earthquake.Change{}, err
+	}
+	var sourceID uuid.UUID
+	err = tx.QueryRow(ctx, `INSERT INTO earthquake_source_records(id,earthquake_id,provider,external_id,source_updated_at,
+		payload_hash,raw_payload,source_url,detail_url,version,first_seen_at,last_seen_at,created_at,updated_at,
+		latest_observation_channel,solution_class)
+		VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,1,$9,$9,$9,$9,$10,$11) RETURNING id`,
+		existing.ID, incoming.Provider, incoming.ExternalID, incoming.SourceUpdatedAt, hash, incoming.RawPayload,
+		incoming.SourceURL, incoming.DetailURL, now, channel, solution).Scan(&sourceID)
+	if err != nil {
+		return earthquake.Change{}, err
+	}
+	if err := insertProviderObservation(ctx, tx, sourceID, 1, channel, solution,
+		incoming.SourceUpdatedAt, hash, incoming.RawPayload, now); err != nil {
+		return earthquake.Change{}, err
+	}
+	evidence, _ := json.Marshal(map[string]any{
+		"policy": map[string]any{
+			"maximum_time_delta_seconds": policy.MaximumTimeDelta.Seconds(),
+			"maximum_distance_km":        policy.MaximumDistanceKM,
+			"maximum_magnitude_diff":     policy.MaximumMagnitudeDiff,
+			"maximum_depth_diff_km":      policy.MaximumDepthDiffKM,
+			"acceptance_threshold":       policy.AcceptanceThreshold,
+			"ambiguity_margin":           policy.AmbiguityMargin,
+		},
+		"selected": match,
+		"ranked":   decision.Ranked,
+	})
+	if _, err := tx.Exec(ctx, `INSERT INTO earthquake_source_associations(id,source_record_id,earthquake_id,method,
+		confidence,algorithm_version,evidence,active,associated_at)
+		VALUES(gen_random_uuid(),$1,$2,'heuristic',$3,$4,$5,TRUE,$6)`,
+		sourceID, existing.ID, match.Score, policy.Version, evidence, now); err != nil {
+		return earthquake.Change{}, err
+	}
+	associationChange := map[string]any{"source_association": map[string]any{
+		"provider": incoming.Provider, "external_id": incoming.ExternalID,
+		"method": "heuristic", "score": match.Score, "algorithm_version": policy.Version,
+	}}
+	if earthquake.PreferCanonicalSource(existing.Provider, preferredSolution, incoming.Provider, solution) {
+		return updateCanonicalFromSource(ctx, tx, existing, incoming, sourceID, 1, now, associationChange)
+	}
+	return updateIncidentAssociation(ctx, tx, existing, incoming, sourceID, associationChange, now)
+}
+
+func loadIncidentWithPreferredSource(ctx context.Context, tx pgx.Tx, id uuid.UUID) (earthquake.Event, earthquake.SolutionClass, error) {
+	var event earthquake.Event
+	var sourceID uuid.UUID
+	var hash []byte
+	var sourceVersion int64
+	var channel string
+	var solution earthquake.SolutionClass
+	err := tx.QueryRow(ctx, `SELECT e.id,e.preferred_source,e.preferred_external_id,e.occurred_at,e.source_updated_at,
+		e.latitude,e.longitude,e.depth_km,e.magnitude,e.magnitude_type,e.place,e.title,e.status,e.event_type,
+		e.alert_level,e.tsunami,e.significance,e.felt_reports,e.cdi,e.mmi,e.station_count,e.azimuthal_gap,
+		e.minimum_distance,e.rms,e.source_url,e.detail_url,e.version,e.first_seen_at,e.last_seen_at,e.created_at,
+		e.updated_at,e.lifecycle,s.id,s.payload_hash,s.version,s.latest_observation_channel,s.solution_class
+		FROM earthquakes e JOIN earthquake_source_records s
+			ON s.earthquake_id=e.id AND s.provider=e.preferred_source AND s.external_id=e.preferred_external_id
+		WHERE e.id=$1 FOR UPDATE OF e`, id).Scan(scanEvent(&event, &sourceID, &hash, &sourceVersion, &channel, &solution)...)
+	return event, solution, err
+}
+
+func incidentPreferredSolution(ctx context.Context, tx pgx.Tx, id uuid.UUID) (earthquake.SolutionClass, error) {
+	var solution earthquake.SolutionClass
+	err := tx.QueryRow(ctx, `SELECT s.solution_class FROM earthquakes e JOIN earthquake_source_records s
+		ON s.earthquake_id=e.id AND s.provider=e.preferred_source AND s.external_id=e.preferred_external_id
+		WHERE e.id=$1`, id).Scan(&solution)
+	return solution, err
+}
+
+func updateIncidentAssociation(ctx context.Context, tx pgx.Tx, existing, incoming earthquake.Event,
+	sourceID uuid.UUID, changed map[string]any, now time.Time) (earthquake.Change, error) {
+	current := existing
+	current.Version++
+	current.LastSeenAt = now
+	current.UpdatedAt = now
+	lifecycle, err := incidentLifecycle(ctx, tx, existing.ID)
+	if err != nil {
+		return earthquake.Change{}, err
+	}
+	current.Lifecycle = lifecycle
+	if existing.Lifecycle != lifecycle {
+		changed["lifecycle"] = map[string]any{"from": existing.Lifecycle, "to": lifecycle}
+	}
+	changedJSON, _ := json.Marshal(changed)
+	if _, err := tx.Exec(ctx, `UPDATE earthquakes SET lifecycle=$2,version=$3,last_seen_at=$4,updated_at=$4 WHERE id=$1`,
+		existing.ID, lifecycle, current.Version, now); err != nil {
+		return earthquake.Change{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO earthquake_revisions(id,earthquake_id,source_record_id,version,source_updated_at,
+		changed_fields,raw_payload,created_at) VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7)`,
+		existing.ID, sourceID, current.Version, incoming.SourceUpdatedAt, changedJSON, incoming.RawPayload, now)
+	return earthquake.Change{Kind: earthquake.Updated, Previous: &existing, Current: current,
+		ChangedFields: changed, SourceRecordID: sourceID}, err
+}
+
 func scanEvent(e *earthquake.Event, sourceID *uuid.UUID, hash *[]byte, sourceVersion *int64, channel *string, solution *earthquake.SolutionClass) []any {
-	return []any{&e.ID, &e.OccurredAt, &e.SourceUpdatedAt, &e.Latitude, &e.Longitude, &e.DepthKM, &e.Magnitude, &e.MagnitudeType,
+	return []any{&e.ID, &e.Provider, &e.ExternalID, &e.OccurredAt, &e.SourceUpdatedAt, &e.Latitude, &e.Longitude, &e.DepthKM, &e.Magnitude, &e.MagnitudeType,
 		&e.Place, &e.Title, &e.Status, &e.EventType, &e.AlertLevel, &e.Tsunami, &e.Significance, &e.FeltReports, &e.CDI, &e.MMI,
 		&e.StationCount, &e.AzimuthalGap, &e.MinimumDistance, &e.RMS, &e.SourceURL, &e.DetailURL, &e.Version, &e.FirstSeenAt,
 		&e.LastSeenAt, &e.CreatedAt, &e.UpdatedAt, &e.Lifecycle, sourceID, hash, sourceVersion, channel, solution}
@@ -426,7 +623,12 @@ func changedFields(a, b earthquake.Event) map[string]any {
 }
 
 func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, mode string, baseline bool, now time.Time) error {
-	candidateRadiusKM := shaking.CandidateRadiusKM(change.Current.Magnitude, change.Current.DepthKM)
+	candidateMinimumMMI := notification.IntensityDecisionBoundary(shaking.MinimumSupportedMMI)
+	candidateRadiusKM := shaking.CandidateRadiusKM(change.Current.Magnitude, change.Current.DepthKM, candidateMinimumMMI)
+	type matchingCounters struct {
+		intensityCandidates, intensityEvaluations, notify, belowThreshold, estimateErrors, triggers int
+	}
+	var counters matchingCounters
 	rows, err := tx.Query(ctx, `SELECT id,name,status,channel,webhook_url,encrypted_webhook_secret,minimum_magnitude,
 		maximum_magnitude,minimum_intensity,notification_language,subscription_kind,
 		center_latitude,center_longitude,radius_km,tsunami_only,allowed_alert_levels,allowed_event_types,
@@ -483,10 +685,13 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 		var estimate *shaking.Estimate
 		var triggers []notification.Trigger
 		if s.SubscriptionKind == "user" && s.Channel == "telegram" && s.MinimumIntensity != nil && item.distanceKM != nil {
+			counters.intensityCandidates++
 			calculated, estimateErr := shaking.EstimateAt(current.Magnitude, current.DepthKM, *item.distanceKM, current.MagnitudeType)
 			if estimateErr != nil {
+				counters.estimateErrors++
 				continue
 			}
+			counters.intensityEvaluations++
 			estimate = &calculated
 			var oldUpper *float64
 			if change.Previous != nil && s.CenterLatitude != nil && s.CenterLongitude != nil {
@@ -502,6 +707,9 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 			decision := "below_threshold"
 			if len(triggers) > 0 {
 				decision = "notify"
+				counters.notify++
+			} else {
+				counters.belowThreshold++
 			}
 			if err := insertIntensityEvaluation(ctx, tx, s.ID, current.ID, current.Version,
 				*s.MinimumIntensity, calculated, decision, now); err != nil {
@@ -510,6 +718,7 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 		} else {
 			triggers = notification.Triggers(s, change.Previous, change.Current, mode, now, baseline)
 		}
+		counters.triggers += len(triggers)
 		for _, trigger := range triggers {
 			deliveryID := uuid.New()
 			payload := notificationPayload(deliveryID, string(trigger), current, sourceLinks,
@@ -530,7 +739,17 @@ func createDeliveries(ctx context.Context, tx pgx.Tx, change earthquake.Change, 
 			}
 		}
 	}
-	return nil
+	_, err = tx.Exec(ctx, `INSERT INTO notification_matching_audits(
+		id,earthquake_id,earthquake_version,mode,baseline_complete,model_version,decision_policy_version,
+		candidate_minimum_mmi,candidate_radius_km,
+		selected_subscription_count,intensity_candidate_count,intensity_evaluation_count,notify_decision_count,
+		below_threshold_count,estimate_error_count,trigger_count,created_at)
+		VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		change.Current.ID, change.Current.Version, mode, baseline, shaking.ModelVersion,
+		notification.IntensityDecisionPolicyVersion, candidateMinimumMMI, candidateRadiusKM,
+		len(subscriptions), counters.intensityCandidates, counters.intensityEvaluations, counters.notify,
+		counters.belowThreshold, counters.estimateErrors, counters.triggers, now)
+	return err
 }
 
 func refreshTelegramAlertMessages(ctx context.Context, tx pgx.Tx, current earthquake.Event, now time.Time) error {
@@ -618,14 +837,17 @@ func insertIntensityEvaluation(ctx context.Context, tx pgx.Tx, subscriptionID, e
 	if err != nil {
 		return err
 	}
+	decisionBoundary := notification.IntensityDecisionBoundary(threshold)
 	_, err = tx.Exec(ctx, `INSERT INTO notification_intensity_evaluations(
 		id,subscription_id,earthquake_id,earthquake_version,model_name,model_version,mean_mmi,sigma_mmi,
-		lower_mmi,upper_mmi,threshold_mmi,epicentral_distance_km,hypocentral_distance_km,magnitude,
+		lower_mmi,upper_mmi,threshold_mmi,decision_boundary_mmi,decision_policy_version,
+		epicentral_distance_km,hypocentral_distance_km,magnitude,
 		depth_km,decision,assumptions,created_at)
-		VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		VALUES(gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT(subscription_id,earthquake_id,earthquake_version,model_version) DO NOTHING`,
 		subscriptionID, earthquakeID, earthquakeVersion, estimate.ModelName, estimate.ModelVersion,
-		estimate.MeanMMI, estimate.SigmaMMI, estimate.LowerMMI, estimate.UpperMMI, threshold,
+		estimate.MeanMMI, estimate.SigmaMMI, estimate.LowerMMI, estimate.UpperMMI, threshold, decisionBoundary,
+		notification.IntensityDecisionPolicyVersion,
 		estimate.EpicentralDistanceKM, estimate.HypocentralDistanceKM, estimate.Magnitude, estimate.DepthKM,
 		decision, assumptions, now)
 	return err

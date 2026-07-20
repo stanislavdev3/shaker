@@ -33,8 +33,9 @@ func TestEstimateAtUsesAuditableDefaultDepth(t *testing.T) {
 
 func TestCandidateRadiusIsDynamicAndConservative(t *testing.T) {
 	low, high := 4.0, 7.0
-	lowRadius := CandidateRadiusKM(&low, nil)
-	highRadius := CandidateRadiusKM(&high, nil)
+	decisionBoundary := 1.5
+	lowRadius := CandidateRadiusKM(&low, nil, decisionBoundary)
+	highRadius := CandidateRadiusKM(&high, nil, decisionBoundary)
 	if lowRadius <= 0 || highRadius <= lowRadius || highRadius == 1000 {
 		t.Fatalf("low=%f high=%f", lowRadius, highRadius)
 	}
@@ -42,7 +43,20 @@ func TestCandidateRadiusIsDynamicAndConservative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(estimate.UpperMMI-MinimumSupportedMMI) > 1e-6 {
+	if math.Abs(estimate.UpperMMI-decisionBoundary) > 1e-6 {
 		t.Fatalf("upper MMI at boundary=%f", estimate.UpperMMI)
+	}
+}
+
+func TestFeltBishkekIncidentFallsInsideCategoryIICandidateRadius(t *testing.T) {
+	magnitude, depth := 4.1, 14.057
+	const distanceKM = 153.17
+	radius := CandidateRadiusKM(&magnitude, &depth, 1.5)
+	estimate, err := EstimateAt(&magnitude, &depth, distanceKM, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if radius <= distanceKM || estimate.UpperMMI < 1.5 || estimate.UpperMMI >= 2 {
+		t.Fatalf("radius=%f estimate=%+v", radius, estimate)
 	}
 }

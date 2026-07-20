@@ -54,7 +54,10 @@ For each event, the service derives a conservative candidate radius from the eve
 magnitude, depth, and the lowest supported MMI. PostGIS uses that dynamic radius only
 to bound the candidate query. The application then predicts MMI separately at every
 candidate subscriber point and notifies when the prediction's one-sigma upper bound
-reaches the subscriber threshold. A fixed user-facing radius is not used.
+reaches the lower boundary of the subscriber's selected integer category. Category
+`T` currently starts at `T - 0.5`, so threshold II is evaluated at 1.5. This decision
+policy is versioned independently from the shaking model. A fixed user-facing radius
+is not used.
 
 The preliminary model is the hypocentral-distance form of Allen, Wald, and Worden
 (2012), versioned as `allen-et-al-2012-rhypo-v1`. It uses a 10 km auditable default when
@@ -64,8 +67,10 @@ extrapolated. This estimate is not an observed ground-motion measurement.
 
 Every candidate decision stores the event version, model name and version, magnitude,
 effective depth, epicentral and hypocentral distance, mean MMI, total sigma, bounds,
-threshold, assumptions, and decision. A later canonical earthquake version recomputes
-the estimate and edits an existing Telegram alert.
+selected threshold, effective decision boundary, decision-policy version, assumptions,
+and decision. A matching-run audit also records the policy version, candidate boundary,
+radius, and aggregate outcomes. A later canonical earthquake version recomputes the
+estimate and edits an existing Telegram alert.
 
 Personal Telegram messages include magnitude, expected MMI and verbal severity, likely
 one-sigma MMI range, distance, depth, place, event time, and provider links. Text and the

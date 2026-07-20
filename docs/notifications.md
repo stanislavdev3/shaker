@@ -13,9 +13,11 @@ radius filters.
 `magnitude_threshold_crossed` applies when the previous magnitude was absent or below the subscription minimum and the new magnitude reaches or exceeds it. Remaining above the threshold does not retrigger.
 
 `intensity_threshold_crossed` is internal to personal Telegram delivery. It applies
-when a new event revision's one-sigma upper MMI estimate reaches the subscriber threshold
-after the previous estimate was below it. The central estimate and one-sigma range are
-included in the message; the conservative upper bound is used only for the decision.
+when a new event revision's one-sigma upper MMI estimate reaches the lower boundary of
+the subscriber's selected MMI category after the previous estimate was below it. The
+current `mmi-category-lower-bound-one-sigma-v1` policy defines that boundary as
+`threshold - 0.5`. The central estimate and one-sigma range are included in the message;
+the conservative upper bound and category boundary are used only for the decision.
 
 `tsunami_activated` applies only to a transition from false or absent to true. `alert_level_increased` uses `none < green < yellow < orange < red`.
 

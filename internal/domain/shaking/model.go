@@ -71,7 +71,7 @@ func EstimateAt(magnitude *float64, depthKM *float64, epicentralDistanceKM float
 
 // CandidateRadiusKM returns a conservative, magnitude-dependent PostGIS search
 // radius. Exact intensity and the subscriber threshold are evaluated afterwards.
-func CandidateRadiusKM(magnitude *float64, depthKM *float64) float64 {
+func CandidateRadiusKM(magnitude *float64, depthKM *float64, minimumUpperMMI float64) float64 {
 	if magnitude == nil || math.IsNaN(*magnitude) || math.IsInf(*magnitude, 0) {
 		return 0
 	}
@@ -83,16 +83,16 @@ func CandidateRadiusKM(magnitude *float64, depthKM *float64) float64 {
 		mean, sigma := allenEtAl2012Rhypo(*magnitude, math.Hypot(epicentral, depth))
 		return mean + sigma
 	}
-	if upperAt(0) < MinimumSupportedMMI {
+	if upperAt(0) < minimumUpperMMI {
 		return 0
 	}
-	if upperAt(maximumSearchKM) >= MinimumSupportedMMI {
+	if upperAt(maximumSearchKM) >= minimumUpperMMI {
 		return maximumSearchKM
 	}
 	low, high := 0.0, maximumSearchKM
 	for range 64 {
 		mid := (low + high) / 2
-		if upperAt(mid) >= MinimumSupportedMMI {
+		if upperAt(mid) >= minimumUpperMMI {
 			low = mid
 		} else {
 			high = mid

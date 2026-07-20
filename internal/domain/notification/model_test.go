@@ -52,12 +52,21 @@ func TestIntensityTriggersUseConservativeUpperBound(t *testing.T) {
 	if got := IntensityTriggers(s, nil, event, nil, 4.1, "realtime", now, true); len(got) != 1 || got[0] != NewEvent {
 		t.Fatalf("new event triggers=%v", got)
 	}
-	if got := IntensityTriggers(s, nil, event, nil, 3.9, "realtime", now, true); len(got) != 0 {
+	if got := IntensityTriggers(s, nil, event, nil, 3.4, "realtime", now, true); len(got) != 0 {
 		t.Fatalf("below-threshold triggers=%v", got)
 	}
-	oldUpper := 3.8
+	oldUpper := 3.4
 	if got := IntensityTriggers(s, &event, event, &oldUpper, 4.2, "realtime", now, true); len(got) != 1 || got[0] != IntensityThresholdCrossed {
 		t.Fatalf("crossing triggers=%v", got)
+	}
+	if got := IntensityTriggers(s, nil, event, nil, 3.5, "realtime", now, true); len(got) != 1 {
+		t.Fatalf("category lower boundary triggers=%v", got)
+	}
+}
+
+func TestIntensityDecisionBoundary(t *testing.T) {
+	if got := IntensityDecisionBoundary(2); got != 1.5 {
+		t.Fatalf("boundary=%f", got)
 	}
 }
 

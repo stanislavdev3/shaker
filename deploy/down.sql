@@ -1,6 +1,8 @@
 DROP TABLE IF EXISTS admin_audit_log;
 DROP FUNCTION IF EXISTS reject_admin_audit_mutation();
 DROP TABLE IF EXISTS admin_role_bindings;
+DROP TABLE IF EXISTS notification_matching_audits;
+DROP FUNCTION IF EXISTS reject_notification_matching_audit_mutation();
 DROP TABLE IF EXISTS notification_deliveries;
 DROP TABLE IF EXISTS notification_subscriptions;
 DROP TABLE IF EXISTS provider_state;

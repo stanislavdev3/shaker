@@ -135,8 +135,12 @@ type CorrelationCandidate struct {
 }
 
 type CorrelationMatch struct {
-	IncidentID uuid.UUID
-	Score      float64
+	IncidentID       uuid.UUID `json:"incident_id"`
+	Score            float64   `json:"score"`
+	TimeDeltaSeconds float64   `json:"time_delta_seconds"`
+	DistanceKM       float64   `json:"distance_km"`
+	MagnitudeDiff    *float64  `json:"magnitude_diff,omitempty"`
+	DepthDiffKM      *float64  `json:"depth_diff_km,omitempty"`
 }
 
 type CorrelationDecision struct {
@@ -156,8 +160,9 @@ func (p CorrelationPolicy) Correlate(incoming Event, candidates []CorrelationCan
 		if candidate.Event.Provider == incoming.Provider {
 			continue
 		}
-		if score, ok := p.score(incoming, candidate.Event); ok {
-			ranked = append(ranked, CorrelationMatch{IncidentID: candidate.IncidentID, Score: score})
+		if match, ok := p.score(incoming, candidate.Event); ok {
+			match.IncidentID = candidate.IncidentID
+			ranked = append(ranked, match)
 		}
 	}
 	sort.Slice(ranked, func(i, j int) bool {
@@ -179,15 +184,16 @@ func (p CorrelationPolicy) Correlate(incoming Event, candidates []CorrelationCan
 	return decision
 }
 
-func (p CorrelationPolicy) score(a, b Event) (float64, bool) {
+func (p CorrelationPolicy) score(a, b Event) (CorrelationMatch, bool) {
 	timeDelta := absDuration(a.OccurredAt.Sub(b.OccurredAt))
 	if timeDelta > p.MaximumTimeDelta {
-		return 0, false
+		return CorrelationMatch{}, false
 	}
 	distance := surfaceDistanceKM(a.Latitude, a.Longitude, b.Latitude, b.Longitude)
 	if distance > p.MaximumDistanceKM {
-		return 0, false
+		return CorrelationMatch{}, false
 	}
+	match := CorrelationMatch{TimeDeltaSeconds: timeDelta.Seconds(), DistanceKM: distance}
 
 	weighted := p.TimeWeight*(1-float64(timeDelta)/float64(p.MaximumTimeDelta)) +
 		p.DistanceWeight*(1-distance/p.MaximumDistanceKM)
@@ -195,23 +201,55 @@ func (p CorrelationPolicy) score(a, b Event) (float64, bool) {
 	if a.Magnitude != nil && b.Magnitude != nil {
 		diff := math.Abs(*a.Magnitude - *b.Magnitude)
 		if diff > p.MaximumMagnitudeDiff {
-			return 0, false
+			return CorrelationMatch{}, false
 		}
+		match.MagnitudeDiff = &diff
 		weighted += p.MagnitudeWeight * (1 - diff/p.MaximumMagnitudeDiff)
 		weights += p.MagnitudeWeight
 	}
 	if a.DepthKM != nil && b.DepthKM != nil {
 		diff := math.Abs(*a.DepthKM - *b.DepthKM)
 		if diff > p.MaximumDepthDiffKM {
-			return 0, false
+			return CorrelationMatch{}, false
 		}
+		match.DepthDiffKM = &diff
 		weighted += p.DepthWeight * (1 - diff/p.MaximumDepthDiffKM)
 		weights += p.DepthWeight
 	}
 	if weights == 0 {
-		return 0, false
+		return CorrelationMatch{}, false
 	}
-	return weighted / weights, true
+	match.Score = weighted / weights
+	return match, true
+}
+
+func ProductionCorrelationPolicy() CorrelationPolicy {
+	return CorrelationPolicy{
+		Version: "emsc-usgs-conservative-v1", MaximumTimeDelta: 30 * time.Second,
+		MaximumDistanceKM: 25, MaximumMagnitudeDiff: 0.5, MaximumDepthDiffKM: 30,
+		TimeWeight: 0.45, DistanceWeight: 0.35, MagnitudeWeight: 0.15, DepthWeight: 0.05,
+		AcceptanceThreshold: 0.82, AmbiguityMargin: 0.08,
+	}
+}
+
+func PreferCanonicalSource(currentProvider string, currentSolution SolutionClass,
+	incomingProvider string, incomingSolution SolutionClass) bool {
+	currentRank, incomingRank := solutionRank(currentSolution), solutionRank(incomingSolution)
+	if incomingRank != currentRank {
+		return incomingRank > currentRank
+	}
+	return providerPriority(incomingProvider) > providerPriority(currentProvider)
+}
+
+func providerPriority(provider string) int {
+	switch provider {
+	case "usgs":
+		return 2
+	case "emsc":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func absDuration(value time.Duration) time.Duration {

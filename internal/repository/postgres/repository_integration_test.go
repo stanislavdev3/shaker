@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -28,7 +29,7 @@ func integrationRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	t.Cleanup(repo.Pool.Close)
-	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE admin_audit_log,admin_role_bindings,
+	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE admin_audit_log,admin_role_bindings,notification_matching_audits,
 		notification_intensity_evaluations,telegram_alert_messages,notification_deliveries,notification_subscriptions,
 		provider_observations,earthquake_source_associations,earthquake_revisions,earthquake_source_records,earthquakes,
 		ingestion_runs,provider_state CASCADE`)
@@ -103,8 +104,18 @@ func TestAdministrationReadModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Sources) != 1 || len(detail.Observations) != 1 || len(detail.Associations) != 1 {
+	if len(detail.Sources) != 1 || len(detail.Observations) != 1 || len(detail.Associations) != 1 || len(detail.MatchingAudits) != 1 {
 		t.Fatalf("unexpected incident detail: %+v", detail)
+	}
+	matchingAudit := detail.MatchingAudits[0]
+	if matchingAudit.CandidateRadiusKM <= 0 || matchingAudit.SelectedSubscriptionCount != 1 || matchingAudit.TriggerCount != 1 {
+		t.Fatalf("unexpected notification matching audit: %+v", matchingAudit)
+	}
+	if _, err := r.Pool.Exec(ctx, `UPDATE notification_matching_audits SET trigger_count=0 WHERE id=$1`, matchingAudit.ID); err == nil {
+		t.Fatal("expected notification matching audit update rejection")
+	}
+	if _, err := r.Pool.Exec(ctx, `DELETE FROM notification_matching_audits WHERE id=$1`, matchingAudit.ID); err == nil {
+		t.Fatal("expected notification matching audit delete rejection")
 	}
 	subscriptions, err := r.ListAdminSubscriptions(ctx, administration.PageFilter{Limit: 50})
 	if err != nil {
@@ -492,6 +503,55 @@ func TestTelegramIntensitySubscriptionAuditsDecisionAndLocalizesPayload(t *testi
 	}
 }
 
+func TestFeltBishkekIncidentNotifiesAtCategoryIILowerBoundary(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 20, 55, 46, 0, time.UTC)
+	const chatID int64 = 45701
+	const userLatitude, userLongitude = 42.838809, 74.604218
+
+	if _, err := r.UpsertTelegramLocation(ctx, chatID, userLatitude, userLongitude, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.SetTelegramLanguage(ctx, chatID, "ru", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ActivateTelegramIntensity(ctx, chatID, 2, now); err != nil {
+		t.Fatal(err)
+	}
+
+	event := testEvent("felt-bishkek-regression", now, 4.1)
+	event.OccurredAt = time.Date(2026, 7, 19, 20, 41, 6, 0, time.UTC)
+	event.Latitude = userLatitude + 153.17/111.195
+	event.Longitude = userLongitude
+	depth := 14.057
+	event.DepthKM = &depth
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "realtime", true, now); err != nil {
+		t.Fatal(err)
+	}
+
+	alerts, err := r.ClaimTelegramAlertMessages(ctx, "felt-regression-worker", 10, 5*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].TelegramChatID != chatID {
+		t.Fatalf("alerts=%+v", alerts)
+	}
+
+	var upper, threshold, boundary float64
+	var policy, decision string
+	if err := r.Pool.QueryRow(ctx, `SELECT upper_mmi,threshold_mmi,decision_boundary_mmi,
+		decision_policy_version,decision FROM notification_intensity_evaluations`).Scan(
+		&upper, &threshold, &boundary, &policy, &decision); err != nil {
+		t.Fatal(err)
+	}
+	if upper < boundary || upper >= threshold || threshold != 2 || boundary != 1.5 ||
+		policy != notification.IntensityDecisionPolicyVersion || decision != "notify" {
+		t.Fatalf("upper=%f threshold=%f boundary=%f policy=%q decision=%q",
+			upper, threshold, boundary, policy, decision)
+	}
+}
+
 func TestGlobalTelegramChannelReceivesUnfilteredWorldwideIncident(t *testing.T) {
 	r := integrationRepository(t)
 	ctx := context.Background()
@@ -616,6 +676,153 @@ func TestIncidentObservationAndTelegramProjection(t *testing.T) {
 	}
 	if updated.Status != "pending_edit" || updated.TelegramMessageID == nil || *updated.TelegramMessageID != 123 {
 		t.Fatalf("updated=%+v", updated)
+	}
+}
+
+func TestCrossProviderCorrelationConvergesToOneIncidentAndTelegramMessage(t *testing.T) {
+	for _, order := range []string{"emsc-first", "usgs-first"} {
+		t.Run(order, func(t *testing.T) {
+			r := integrationRepository(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 19, 20, 55, 46, 0, time.UTC)
+			if _, err := r.UpsertGlobalTelegramChannel(ctx, -10042, "@eqmonitor", now); err != nil {
+				t.Fatal(err)
+			}
+
+			emsc := testEvent("20260719_0001", now, 4.2)
+			emsc.Provider = "emsc"
+			emsc.OccurredAt = time.Date(2026, 7, 19, 20, 41, 7, 79000000, time.UTC)
+			emsc.Latitude, emsc.Longitude = 42.1, 74.2
+			emscDepth := 12.0
+			emsc.DepthKM = &emscDepth
+			eventType := "earthquake"
+			emsc.EventType = &eventType
+			emsc.ObservationChannel = "emsc_websocket"
+			emsc.SolutionClass = earthquake.PreliminarySolution
+
+			usgs := testEvent("us7000felt", now.Add(time.Second), 4.1)
+			usgs.Provider = "usgs"
+			usgs.OccurredAt = time.Date(2026, 7, 19, 20, 41, 6, 0, time.UTC)
+			usgs.Latitude, usgs.Longitude = 42.14245, 74.2
+			usgsDepth := 14.057
+			usgs.DepthKM = &usgsDepth
+			usgs.EventType = &eventType
+			usgs.ObservationChannel = "usgs_realtime"
+			usgs.SolutionClass = earthquake.ConfirmedSolution
+
+			first, second := emsc, usgs
+			if order == "usgs-first" {
+				first, second = usgs, emsc
+			}
+			if stats, err := r.ApplyBatch(ctx, []earthquake.Event{first}, "realtime", true, now); err != nil || stats.Inserted != 1 {
+				t.Fatalf("first stats=%+v err=%v", stats, err)
+			}
+			if stats, err := r.ApplyBatch(ctx, []earthquake.Event{second}, "realtime", true, now.Add(2*time.Second)); err != nil || stats.Updated != 1 {
+				t.Fatalf("second stats=%+v err=%v", stats, err)
+			}
+
+			var incidents, sources, associations, heuristicAssociations, messages int
+			var preferredSource, lifecycle, algorithm string
+			var score, timeDelta, distanceKM float64
+			err := r.Pool.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM earthquakes),
+				(SELECT count(*) FROM earthquake_source_records),
+				(SELECT count(*) FROM earthquake_source_associations WHERE active),
+				(SELECT count(*) FROM earthquake_source_associations WHERE active AND method='heuristic'),
+				(SELECT count(*) FROM telegram_alert_messages),
+				e.preferred_source,e.lifecycle,a.algorithm_version,a.confidence,
+				(a.evidence->'selected'->>'time_delta_seconds')::float8,
+				(a.evidence->'selected'->>'distance_km')::float8
+				FROM earthquakes e
+				JOIN earthquake_source_associations a ON a.earthquake_id=e.id AND a.method='heuristic'
+				GROUP BY e.preferred_source,e.lifecycle,a.algorithm_version,a.confidence,a.evidence`).Scan(
+				&incidents, &sources, &associations, &heuristicAssociations, &messages,
+				&preferredSource, &lifecycle, &algorithm, &score, &timeDelta, &distanceKM)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if incidents != 1 || sources != 2 || associations != 2 || heuristicAssociations != 1 || messages != 1 ||
+				preferredSource != "usgs" || lifecycle != "confirmed" ||
+				algorithm != earthquake.ProductionCorrelationPolicy().Version ||
+				score < earthquake.ProductionCorrelationPolicy().AcceptanceThreshold ||
+				timeDelta < 1 || distanceKM < 4 {
+				t.Fatalf("incidents=%d sources=%d associations=%d heuristic=%d messages=%d preferred=%q lifecycle=%q algorithm=%q score=%f dt=%f distance=%f",
+					incidents, sources, associations, heuristicAssociations, messages, preferredSource,
+					lifecycle, algorithm, score, timeDelta, distanceKM)
+			}
+		})
+	}
+}
+
+func TestCrossProviderCorrelationKeepsAmbiguousClusterSeparate(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for index, latitude := range []float64{42.0, 42.01} {
+		event := testEvent(fmt.Sprintf("emsc-cluster-%d", index), now.Add(time.Duration(index)*time.Second), 4.2)
+		event.Provider = "emsc"
+		event.OccurredAt = now.Add(time.Duration(index) * time.Second)
+		event.Latitude, event.Longitude = latitude, 74
+		event.SolutionClass = earthquake.ConfirmedSolution
+		if _, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "backfill", true, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	incoming := testEvent("usgs-ambiguous", now.Add(2*time.Second), 4.2)
+	incoming.Provider = "usgs"
+	incoming.OccurredAt = now.Add(500 * time.Millisecond)
+	incoming.Latitude, incoming.Longitude = 42.005, 74
+	incoming.SolutionClass = earthquake.ConfirmedSolution
+	if _, err := r.ApplyBatch(ctx, []earthquake.Event{incoming}, "backfill", true, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var incidents, heuristic int
+	if err := r.Pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE EXISTS (
+		SELECT 1 FROM earthquake_source_associations a WHERE a.earthquake_id=e.id AND a.method='heuristic'))
+		FROM earthquakes e`).Scan(&incidents, &heuristic); err != nil {
+		t.Fatal(err)
+	}
+	if incidents != 3 || heuristic != 0 {
+		t.Fatalf("incidents=%d heuristic=%d", incidents, heuristic)
+	}
+}
+
+func TestCrossProviderCorrelationSerializesConcurrentFirstSightings(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	emsc := testEvent("emsc-concurrent-pair", now, 4.2)
+	emsc.Provider = "emsc"
+	emsc.OccurredAt = now.Add(-time.Second)
+	emsc.Latitude, emsc.Longitude = 42, 74
+	usgs := testEvent("usgs-concurrent-pair", now, 4.1)
+	usgs.Provider = "usgs"
+	usgs.OccurredAt = now
+	usgs.Latitude, usgs.Longitude = 42.02, 74
+
+	start := make(chan struct{})
+	errorsByProvider := make(chan error, 2)
+	for _, event := range []earthquake.Event{emsc, usgs} {
+		go func(event earthquake.Event) {
+			<-start
+			_, err := r.ApplyBatch(ctx, []earthquake.Event{event}, "backfill", true, now)
+			errorsByProvider <- err
+		}(event)
+	}
+	close(start)
+	for range 2 {
+		if err := <-errorsByProvider; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var incidents, sources int
+	if err := r.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM earthquakes),(SELECT count(*) FROM earthquake_source_records)`).Scan(
+		&incidents, &sources); err != nil {
+		t.Fatal(err)
+	}
+	if incidents != 1 || sources != 2 {
+		t.Fatalf("incidents=%d sources=%d", incidents, sources)
 	}
 }
 

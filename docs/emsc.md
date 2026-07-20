@@ -60,13 +60,14 @@ open provider connections.
 
 ## Current correlation boundary
 
-EMSC standing-order and EMSC FDSN observations are merged by their authoritative
-shared `unid`. Cross-provider EMSC-to-USGS heuristic association remains disabled
-until replay fixtures calibrate the policy described in
-[`event-correlation.md`](event-correlation.md). Until that work is activated,
-enabling both providers can temporarily represent the same physical earthquake
-as two canonical incidents. This favors a visible duplicate over an unsafe merge
-of nearby earthquakes.
+EMSC standing-order and EMSC FDSN observations are merged by their authoritative shared
+`unid`. Previously unseen EMSC and USGS identities are also eligible for automatic
+cross-provider association under the conservative, replay-calibrated
+`emsc-usgs-conservative-v1` policy described in
+[`event-correlation.md`](event-correlation.md). Ambiguous and below-threshold candidates
+remain separate incidents, with their ranked decision evidence stored on the
+`new_incident` association. Accepted links store the score, component deltas, complete
+ranked candidates, gates, and algorithm version on the immutable association history.
 
-The next correlation increment should use authoritative EventID mappings where
-available, then replay-calibrated heuristic matching for the remaining events.
+Authoritative EventID mappings remain preferable when available and should be added as
+a higher-priority correlation mechanism in a future increment.

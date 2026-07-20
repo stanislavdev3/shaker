@@ -47,12 +47,21 @@
 </tr>{{else}}<tr><td colspan="6" class="empty">No observations.</td></tr>{{end}}</tbody></table></div>
 
 <div class="section-heading"><div><h2>Local intensity evaluations</h2><p>Expected shaking at subscriber locations, including uncertainty bounds.</p></div><span>{{len .Incident.Evaluations}}</span></div>
-<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Created</th><th>Subscription</th><th>Model</th><th>MMI mean</th><th>Upper</th><th>Threshold</th><th>Distance</th><th>Decision</th></tr></thead><tbody>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Created</th><th>Subscription</th><th>Model / policy</th><th>MMI mean</th><th>Upper</th><th>Threshold / boundary</th><th>Distance</th><th>Decision</th></tr></thead><tbody>
 {{range .Incident.Evaluations}}<tr>
-  <td>{{time .CreatedAt}}</td><td><a class="mono" href="/admin/subscriptions/{{.SubscriptionID}}">{{short .SubscriptionID}}</a></td><td>{{.ModelName}} <span class="secondary-text">{{.ModelVersion}}</span></td>
-  <td><strong>{{printf "%.2f" .MeanMMI}}</strong></td><td>{{printf "%.2f" .UpperMMI}}</td><td>{{printf "%.1f" .ThresholdMMI}}</td><td>{{printf "%.1f km" .EpicentralDistanceKM}}</td>
+  <td>{{time .CreatedAt}}</td><td><a class="mono" href="/admin/subscriptions/{{.SubscriptionID}}">{{short .SubscriptionID}}</a></td><td>{{.ModelName}} <span class="secondary-text">{{.ModelVersion}} · {{.DecisionPolicyVersion}}</span></td>
+  <td><strong>{{printf "%.2f" .MeanMMI}}</strong></td><td>{{printf "%.2f" .UpperMMI}}</td><td>{{printf "%.1f" .ThresholdMMI}} <span class="secondary-text">boundary {{printf "%.1f" .DecisionBoundaryMMI}}</span></td><td>{{printf "%.1f km" .EpicentralDistanceKM}}</td>
   <td><span class="status status-{{statusClass .Decision}}">{{.Decision}}</span></td>
 </tr>{{else}}<tr><td colspan="8" class="empty">No intensity evaluations.</td></tr>{{end}}</tbody></table></div>
+
+<div class="section-heading"><div><h2>Notification matching audit</h2><p>Immutable prefilter, model, decision, and trigger counts for each incident version.</p></div><span>{{len .Incident.MatchingAudits}}</span></div>
+<div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Recorded</th><th>Version</th><th>Mode</th><th>Search radius</th><th>Selected</th><th>Evaluated</th><th>Notify / below</th><th>Errors</th><th>Triggers</th><th>Model / policy</th></tr></thead><tbody>
+{{range .Incident.MatchingAudits}}<tr>
+  <td>{{time .CreatedAt}}</td><td class="mono">v{{.EarthquakeVersion}}</td><td>{{.Mode}}</td>
+  <td>{{printf "%.1f km" .CandidateRadiusKM}} <span class="secondary-text">at MMI {{printf "%.1f" .CandidateMinimumMMI}}</span></td><td>{{.SelectedSubscriptionCount}} <span class="secondary-text">{{.IntensityCandidateCount}} intensity</span></td>
+  <td>{{.IntensityEvaluationCount}}</td><td><span class="status status-success">{{.NotifyDecisionCount}} notify</span> <span class="status status-warning">{{.BelowThresholdCount}} below</span></td>
+  <td>{{.EstimateErrorCount}}</td><td>{{.TriggerCount}}</td><td class="mono">{{.ModelVersion}}<br>{{.DecisionPolicyVersion}}</td>
+</tr>{{else}}<tr><td colspan="10" class="empty">No matching audit was recorded for this incident.</td></tr>{{end}}</tbody></table></div>
 
 <div class="section-heading"><div><h2>Canonical revisions</h2><p>Versioned changes to the canonical incident.</p></div><span>{{len .Incident.Revisions}}</span></div>
 <div class="card table-wrap"><table class="table table-vcenter"><thead><tr><th>Version</th><th>Source updated</th><th>Recorded</th><th>Changed fields</th></tr></thead><tbody>

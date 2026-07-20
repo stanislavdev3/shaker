@@ -16,12 +16,19 @@ var ErrSubscriptionNotFound = errors.New("notification subscription not found")
 type Trigger string
 
 const (
+	IntensityDecisionPolicyVersion = "mmi-category-lower-bound-one-sigma-v1"
+	IntensityCategoryHalfWidth     = 0.5
+
 	NewEvent                  Trigger = "new_event"
 	MagnitudeThresholdCrossed Trigger = "magnitude_threshold_crossed"
 	IntensityThresholdCrossed Trigger = "intensity_threshold_crossed"
 	TsunamiActivated          Trigger = "tsunami_activated"
 	AlertLevelIncreased       Trigger = "alert_level_increased"
 )
+
+func IntensityDecisionBoundary(thresholdMMI float64) float64 {
+	return max(1, thresholdMMI-IntensityCategoryHalfWidth)
+}
 
 type Subscription struct {
 	ID                        uuid.UUID
@@ -54,7 +61,8 @@ type Subscription struct {
 
 func IntensityTriggers(s Subscription, old *earthquake.Event, current earthquake.Event, oldUpperMMI *float64,
 	currentUpperMMI float64, mode string, now time.Time, baselineComplete bool) []Trigger {
-	if s.Status != "active" || s.MinimumIntensity == nil || currentUpperMMI < *s.MinimumIntensity || !matchesNonMagnitude(s, current) {
+	if s.Status != "active" || s.MinimumIntensity == nil ||
+		currentUpperMMI < IntensityDecisionBoundary(*s.MinimumIntensity) || !matchesNonMagnitude(s, current) {
 		return nil
 	}
 	if old == nil {
@@ -63,7 +71,8 @@ func IntensityTriggers(s Subscription, old *earthquake.Event, current earthquake
 		}
 		return nil
 	}
-	if s.NotifyOnThresholdCrossing && (oldUpperMMI == nil || *oldUpperMMI < *s.MinimumIntensity) {
+	if s.NotifyOnThresholdCrossing &&
+		(oldUpperMMI == nil || *oldUpperMMI < IntensityDecisionBoundary(*s.MinimumIntensity)) {
 		return []Trigger{IntensityThresholdCrossed}
 	}
 	return nil

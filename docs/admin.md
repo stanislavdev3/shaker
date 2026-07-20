@@ -122,7 +122,10 @@ aggregated metrics.
 - immutable provider observations and revisions;
 - canonical provenance for each field;
 - association method, confidence, algorithm version, and evidence;
-- local MMI evaluations, model version, uncertainty, assumptions, and decision;
+- local MMI evaluations, model and decision-policy versions, selected category,
+  effective decision boundary, uncertainty, assumptions, and decision;
+- immutable notification matching runs with their prefilter radius, decision counts,
+  model errors, and created triggers;
 - Telegram alert projections and webhook deliveries for the incident;
 - deep links to filtered Grafana and Loki views.
 

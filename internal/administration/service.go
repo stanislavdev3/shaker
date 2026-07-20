@@ -85,10 +85,23 @@ type Association struct {
 type IntensityEvaluation struct {
 	ID, SubscriptionID                                              uuid.UUID
 	EarthquakeVersion                                               int64
-	ModelName, ModelVersion, Decision                               string
+	ModelName, ModelVersion, Decision, DecisionPolicyVersion        string
 	MeanMMI, SigmaMMI, LowerMMI, UpperMMI, ThresholdMMI             float64
+	DecisionBoundaryMMI                                             float64
 	EpicentralDistanceKM, HypocentralDistanceKM, Magnitude, DepthKM float64
 	CreatedAt                                                       time.Time
+}
+
+type NotificationMatchingAudit struct {
+	ID, EarthquakeID                                                   uuid.UUID
+	EarthquakeVersion                                                  int64
+	Mode, ModelVersion, DecisionPolicyVersion                          string
+	BaselineComplete                                                   bool
+	CandidateRadiusKM, CandidateMinimumMMI                             float64
+	SelectedSubscriptionCount, IntensityCandidateCount                 int
+	IntensityEvaluationCount, NotifyDecisionCount, BelowThresholdCount int
+	EstimateErrorCount, TriggerCount                                   int
+	CreatedAt                                                          time.Time
 }
 
 type Revision struct {
@@ -100,13 +113,14 @@ type Revision struct {
 }
 
 type IncidentDetail struct {
-	Incident     earthquake.Event
-	Provenance   []byte
-	Sources      []SourceRecord
-	Observations []Observation
-	Associations []Association
-	Evaluations  []IntensityEvaluation
-	Revisions    []Revision
+	Incident       earthquake.Event
+	Provenance     []byte
+	Sources        []SourceRecord
+	Observations   []Observation
+	Associations   []Association
+	Evaluations    []IntensityEvaluation
+	MatchingAudits []NotificationMatchingAudit
+	Revisions      []Revision
 }
 
 type NotificationItem struct {

@@ -49,10 +49,12 @@ pages provide contextual deep links. See [admin.md](admin.md).
 New personal Telegram subscriptions use expected Modified Mercalli Intensity at the
 subscriber point instead of a fixed epicentral radius and minimum magnitude. Preliminary
 estimates use the Allen, Wald, and Worden (2012) hypocentral-distance IPE. The alert
-decision uses the one-sigma upper estimate to reduce false negatives, while the message
-shows the central estimate and range. Model inputs, assumptions, version, uncertainty,
-and decisions are immutable audit records. A future observed ShakeMap can replace the
-preliminary estimate without discarding it.
+decision uses the one-sigma upper estimate to reduce false negatives. An integer MMI
+selection represents a category whose lower decision boundary is `threshold - 0.5`;
+this versioned product policy is separate from the IPE version. The message shows the
+central estimate and range. Model inputs, assumptions, versions, uncertainty, effective
+boundary, and decisions are immutable audit records. A future observed ShakeMap can
+replace the preliminary estimate without discarding it.
 
 Existing magnitude-and-radius subscriptions are not silently converted because no
 scientifically valid one-to-one mapping exists. They remain in legacy mode until the
