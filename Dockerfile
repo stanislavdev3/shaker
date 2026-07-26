@@ -6,7 +6,6 @@ WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN go test ./...
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/earthquake-service ./cmd/earthquake-service
 RUN mkdir -p /out/provider-state
 

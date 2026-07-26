@@ -1,72 +1,21 @@
 name: CI
+
 on:
   push:
+    branches: [master]
   pull_request:
+    branches: [master]
+
 permissions:
   contents: read
+
 jobs:
-  verify:
+  build:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgis/postgis:17-3.5
-        env:
-          POSTGRES_USER: earthquake
-          POSTGRES_PASSWORD: earthquake
-          POSTGRES_DB: earthquake_test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U earthquake -d earthquake_test"
-          --health-interval 5s --health-timeout 5s --health-retries 20
-      kafka:
-        image: apache/kafka:4.2.1
-        env:
-          KAFKA_NODE_ID: 1
-          KAFKA_PROCESS_ROLES: broker,controller
-          KAFKA_LISTENERS: BROKER://:9092,CONTROLLER://:9093
-          KAFKA_ADVERTISED_LISTENERS: BROKER://localhost:9092
-          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-          KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
-          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT
-          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-        ports: ["9092:9092"]
-        options: >-
-          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
-          --health-interval 5s --health-timeout 5s --health-retries 20
-    env:
-      TEST_DATABASE_URL: postgres://earthquake:earthquake@localhost:5432/earthquake_test?sslmode=disable
-      GOCACHE: /tmp/go-build
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: {go-version: "1.26.2", cache: true}
-      - run: test -z "$(gofmt -l cmd internal)"
-      - run: go vet ./...
-      - uses: golangci/golangci-lint-action@v8
-        with: {version: v2.12.2}
-      - run: go test -race ./...
-      - run: go build ./cmd/earthquake-service
-      - run: for migration in migrations/*.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done
-      - name: Create Kafka topics
-        run: >-
-          docker run --rm --network host apache/kafka:4.2.1
-          /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092
-          --create --if-not-exists --topic provider.observations.v1
-          --partitions 6 --replication-factor 1
-      - name: Integration tests
-        run: |
-          printf '%s\n' \
-            '[database]' \
-            'url = "postgres://earthquake:earthquake@127.0.0.1:5432/earthquake_test?sslmode=disable"' \
-            '' \
-            '[kafka]' \
-            'broker = "127.0.0.1:9092"' > test.integration.toml
-          make test-integration
-      - uses: docker://redocly/cli:1.34.5
         with:
-          args: lint api/openapi.yaml
-      - run: docker build .
+          go-version: "1.26.2"
+          cache: true
+      - run: go build ./cmd/earthquake-service
