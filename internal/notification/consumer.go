@@ -9,6 +9,7 @@ import (
 	"github.com/example/earthquake-service/internal/clock"
 	"github.com/example/earthquake-service/internal/eventstream"
 	"github.com/example/earthquake-service/internal/kafka"
+	"github.com/example/earthquake-service/internal/observability"
 	"github.com/example/earthquake-service/internal/repository/postgres"
 )
 
@@ -17,6 +18,7 @@ type IncidentConsumer struct {
 	repo     IncidentRepository
 	clock    clock.Clock
 	log      *slog.Logger
+	metrics  *observability.Metrics
 }
 
 type IncidentRecordConsumer interface {
@@ -31,9 +33,13 @@ type IncidentRepository interface {
 }
 
 func NewIncidentConsumer(consumer IncidentRecordConsumer, repo IncidentRepository, c clock.Clock,
-	log *slog.Logger,
+	log *slog.Logger, metrics ...*observability.Metrics,
 ) *IncidentConsumer {
-	return &IncidentConsumer{consumer: consumer, repo: repo, clock: c, log: log}
+	processor := &IncidentConsumer{consumer: consumer, repo: repo, clock: c, log: log}
+	if len(metrics) > 0 {
+		processor.metrics = metrics[0]
+	}
+	return processor
 }
 
 func (c *IncidentConsumer) Run(ctx context.Context) error {
@@ -53,10 +59,14 @@ func (c *IncidentConsumer) Run(ctx context.Context) error {
 			c.consumer.AllowRebalance()
 			return fmt.Errorf("incident change key %q does not match %q", record.Key, expectedKey)
 		}
+		started := c.clock.Now()
 		processed, err := c.repo.ApplyIncidentMessage(ctx, postgres.MessagePosition{
 			Topic: record.Topic, Partition: record.Partition, Offset: record.Offset,
 		}, message, c.clock.Now())
 		if err != nil {
+			if c.metrics != nil {
+				c.metrics.ObserveIncidentChange(string(message.Operation), "error", c.clock.Now().Sub(started))
+			}
 			c.consumer.AllowRebalance()
 			return fmt.Errorf("apply incident change %s: %w", message.MessageID, err)
 		}
@@ -65,6 +75,13 @@ func (c *IncidentConsumer) Run(ctx context.Context) error {
 			return fmt.Errorf("commit incident change %s: %w", message.MessageID, err)
 		}
 		c.consumer.AllowRebalance()
+		if c.metrics != nil {
+			result := "processed"
+			if !processed {
+				result = "duplicate"
+			}
+			c.metrics.ObserveIncidentChange(string(message.Operation), result, c.clock.Now().Sub(started))
+		}
 		c.log.Info("incident change consumed", "message_id", message.MessageID,
 			"earthquake_id", message.Incident.ID, "earthquake_version", message.Incident.Version,
 			"processed", processed, "notifications_eligible", message.NotificationsEligible)

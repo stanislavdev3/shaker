@@ -1,16 +1,10 @@
 GO ?= go
 GOCACHE ?= /tmp/earthquake-service-go-cache
-SERVER_DIR ?= ../../server
-DEPLOY_COMPOSE := $(SERVER_DIR)/services/screaming-dog/docker-compose.yml
-DEPLOY_MIGRATE_COMPOSE := deploy/docker-compose.migrate.yml
-DEPLOY_ENV := $(SERVER_DIR)/.env
 IMAGE ?= shaker:latest
-ATLAS_IMAGE ?= arigaio/atlas:1.2.3
-DEPLOY_MIGRATION_BASELINE ?= 202607130001
 INTEGRATION_CONFIG ?= test.integration.toml
 export GOCACHE
 
-.PHONY: build image test test-unit test-integration lint fmt generate migrate migrate-down compose-up compose-down backfill openapi-check deploy
+.PHONY: build image test test-unit test-integration lint fmt generate migrate migrate-down compose-up compose-down backfill openapi-check release
 build:
 	$(GO) build ./cmd/earthquake-service
 image:
@@ -40,11 +34,12 @@ backfill:
 	$(GO) run ./cmd/earthquake-service backfill --from "$$FROM" --to "$$TO"
 openapi-check:
 	docker run --rm -v "$$(pwd):/spec" redocly/cli:1.34.5 lint /spec/api/openapi.yaml
-deploy: image
-	test -f "$(DEPLOY_COMPOSE)"
-	test -f "$(DEPLOY_ENV)"
-	test -f "$(DEPLOY_MIGRATE_COMPOSE)"
-	SHAKER_IMAGE="$(IMAGE)" docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" up -d --wait postgres
-	SHAKER_REPOSITORY_DIR="$(CURDIR)" ATLAS_IMAGE="$(ATLAS_IMAGE)" DEPLOY_MIGRATION_BASELINE="$(DEPLOY_MIGRATION_BASELINE)" docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" -f "$(DEPLOY_MIGRATE_COMPOSE)" run --rm --no-deps migrate
-	SHAKER_IMAGE="$(IMAGE)" docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" up -d
-	docker compose --env-file "$(DEPLOY_ENV)" -f "$(DEPLOY_COMPOSE)" ps
+release: test openapi-check
+	@test -n "$(VERSION)" || (echo 'Usage: make release VERSION=v0.2.0' >&2; exit 1)
+	@case "$(VERSION)" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo 'VERSION must look like v0.2.0' >&2; exit 1 ;; esac
+	@test -z "$$(git status --porcelain)" || (echo 'Working tree must be clean' >&2; exit 1)
+	@test "$$(git branch --show-current)" = master || (echo 'Release must be created from master' >&2; exit 1)
+	@! git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null || (echo 'Tag $(VERSION) already exists' >&2; exit 1)
+	git push origin master
+	git tag -a "$(VERSION)" -m "Release $(VERSION)"
+	git push origin "$(VERSION)"

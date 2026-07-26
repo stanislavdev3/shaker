@@ -8,6 +8,7 @@ import (
 
 	"github.com/example/earthquake-service/internal/clock"
 	"github.com/example/earthquake-service/internal/kafka"
+	"github.com/example/earthquake-service/internal/observability"
 	"github.com/example/earthquake-service/internal/repository/postgres"
 )
 
@@ -19,6 +20,7 @@ type OutboxRelay struct {
 	workerID               string
 	batch                  int
 	lockTimeout, pollDelay time.Duration
+	metrics                *observability.Metrics
 }
 
 type MessagePublisher interface {
@@ -26,10 +28,14 @@ type MessagePublisher interface {
 }
 
 func NewOutboxRelay(repo *postgres.Repository, publisher MessagePublisher, c clock.Clock, log *slog.Logger,
-	workerID string, batch int, lockTimeout, pollDelay time.Duration,
+	workerID string, batch int, lockTimeout, pollDelay time.Duration, metrics ...*observability.Metrics,
 ) *OutboxRelay {
-	return &OutboxRelay{repo: repo, publisher: publisher, clock: c, log: log, workerID: workerID,
+	relay := &OutboxRelay{repo: repo, publisher: publisher, clock: c, log: log, workerID: workerID,
 		batch: batch, lockTimeout: lockTimeout, pollDelay: pollDelay}
+	if len(metrics) > 0 {
+		relay.metrics = metrics[0]
+	}
+	return relay
 }
 
 func (r *OutboxRelay) Run(ctx context.Context) {
@@ -73,11 +79,21 @@ func (r *OutboxRelay) process(ctx context.Context) {
 		}
 		if err := r.repo.CompleteCoreOutbox(context.WithoutCancel(ctx), message.ID, r.workerID, r.clock.Now()); err != nil {
 			r.log.Error("complete core outbox", "message_id", message.ID, "error", err)
+			if r.metrics != nil {
+				r.metrics.ObserveCoreOutbox("complete_error")
+			}
+			continue
+		}
+		if r.metrics != nil {
+			r.metrics.ObserveCoreOutbox("published")
 		}
 	}
 }
 
 func (r *OutboxRelay) fail(ctx context.Context, message postgres.OutboxMessage, publishErr error) {
+	if r.metrics != nil {
+		r.metrics.ObserveCoreOutbox("publish_error")
+	}
 	now := r.clock.Now()
 	delay := time.Second << min(message.AttemptCount, 8)
 	if err := r.repo.FailCoreOutbox(context.WithoutCancel(ctx), message.ID, r.workerID, publishErr.Error(),

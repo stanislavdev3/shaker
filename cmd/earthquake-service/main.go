@@ -184,6 +184,7 @@ func runProviderWorker(ctx context.Context, cfg config.Config, userAgent string,
 	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
 		return fmt.Errorf("start provider metrics server: %w", err)
 	}
+	metrics := observability.NewMetrics(prometheus.DefaultRegisterer)
 	publisher, err := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaClientID, int32(cfg.KafkaMaxMessageBytes))
 	if err != nil {
 		return fmt.Errorf("initialize Kafka producer: %w", err)
@@ -221,7 +222,7 @@ func runProviderWorker(ctx context.Context, cfg config.Config, userAgent string,
 	default:
 		return fmt.Errorf("unsupported provider %q", cfg.ProviderName)
 	}
-	service := providerworker.New(source, publisher, state, clock.Real{}, log)
+	service := providerworker.New(source, publisher, state, clock.Real{}, log, metrics)
 	if err := service.Recover(ctx, cfg.RecoveryOverlapDuration, cfg.BackfillChunkDuration); err != nil {
 		return fmt.Errorf("recover provider observations: %w", err)
 	}
@@ -236,6 +237,7 @@ func runCore(ctx context.Context, cfg config.Config, repo *postgres.Repository, 
 	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
 		return fmt.Errorf("start core metrics server: %w", err)
 	}
+	metrics := observability.NewMetrics(prometheus.DefaultRegisterer)
 	publisher, err := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaClientID+"-outbox", int32(cfg.KafkaMaxMessageBytes))
 	if err != nil {
 		return fmt.Errorf("initialize core Kafka producer: %w", err)
@@ -246,7 +248,7 @@ func runCore(ctx context.Context, cfg config.Config, repo *postgres.Repository, 
 	if err != nil {
 		return fmt.Errorf("initialize core Kafka consumer: %w", err)
 	}
-	processor := coreservice.NewObservationConsumer(consumer, repo, clock.Real{}, log)
+	processor := coreservice.NewObservationConsumer(consumer, repo, clock.Real{}, log, metrics)
 	defer processor.Close()
 	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -257,7 +259,7 @@ func runCore(ctx context.Context, cfg config.Config, repo *postgres.Repository, 
 		return fmt.Errorf("connect core consumer to Kafka: %w", err)
 	}
 	relay := coreservice.NewOutboxRelay(repo, publisher, clock.Real{}, log, "core-outbox-"+uuid.NewString(),
-		cfg.CoreOutboxBatchSize, cfg.CoreOutboxLockTimeout, cfg.CoreOutboxPollInterval)
+		cfg.CoreOutboxBatchSize, cfg.CoreOutboxLockTimeout, cfg.CoreOutboxPollInterval, metrics)
 	go relay.Run(ctx)
 	log.Info("core service started", "consumer_group", cfg.KafkaCoreConsumerGroup)
 	return processor.Run(ctx)
@@ -269,12 +271,13 @@ func runNotification(ctx context.Context, cfg config.Config, repo *postgres.Repo
 	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
 		return fmt.Errorf("start notification metrics server: %w", err)
 	}
+	metrics := observability.NewMetrics(prometheus.DefaultRegisterer)
 	consumer, err := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaClientID+"-consumer",
 		cfg.KafkaNotificationConsumerGroup, eventstream.IncidentChangesTopic, int32(cfg.KafkaMaxMessageBytes))
 	if err != nil {
 		return fmt.Errorf("initialize notification Kafka consumer: %w", err)
 	}
-	processor := notification.NewIncidentConsumer(consumer, repo, clock.Real{}, log)
+	processor := notification.NewIncidentConsumer(consumer, repo, clock.Real{}, log, metrics)
 	defer processor.Close()
 	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -288,7 +291,7 @@ func runNotification(ctx context.Context, cfg config.Config, repo *postgres.Repo
 	worker := notification.NewWorker(repo, cipher, clock.Real{}, log, "notification-"+uuid.NewString(), userAgent,
 		cfg.NotificationBatchSize, cfg.NotificationMaxAttempts, cfg.NotificationLockTimeout,
 		cfg.NotificationPollInterval, cfg.WebhookHTTPTimeout, cfg.WebhookMaxResponseBytes,
-		cfg.WebhookAllowPrivate, telegramClient)
+		cfg.WebhookAllowPrivate, telegramClient, metrics)
 	go worker.Run(ctx)
 	log.Info("notification service started", "consumer_group", cfg.KafkaNotificationConsumerGroup)
 	return processor.Run(ctx)

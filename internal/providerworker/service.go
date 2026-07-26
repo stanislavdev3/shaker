@@ -11,6 +11,7 @@ import (
 	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/eventstream"
 	"github.com/example/earthquake-service/internal/kafka"
+	"github.com/example/earthquake-service/internal/observability"
 	"github.com/example/earthquake-service/internal/provider"
 )
 
@@ -24,18 +25,36 @@ type Service struct {
 	state     StateStore
 	clock     clock.Clock
 	log       *slog.Logger
+	metrics   *observability.Metrics
 }
 
-func New(p provider.Provider, publisher Publisher, state StateStore, c clock.Clock, log *slog.Logger) *Service {
-	return &Service{provider: p, publisher: publisher, state: state, clock: c, log: log}
+func New(p provider.Provider, publisher Publisher, state StateStore, c clock.Clock, log *slog.Logger,
+	metrics ...*observability.Metrics,
+) *Service {
+	service := &Service{provider: p, publisher: publisher, state: state, clock: c, log: log}
+	if len(metrics) > 0 {
+		service.metrics = metrics[0]
+	}
+	return service
 }
 
 func (s *Service) Poll(ctx context.Context) error {
+	started := s.clock.Now()
+	mode := "unknown"
+	result := "error"
+	fetched := 0
+	invalid := 0
+	defer func() {
+		if s.metrics != nil {
+			completedAt := s.clock.Now()
+			s.metrics.ObserveProviderPoll(s.provider.Name(), mode, result, completedAt, completedAt.Sub(started), fetched, invalid)
+		}
+	}()
 	state, err := s.loadState(ctx)
 	if err != nil {
 		return err
 	}
-	mode := "realtime"
+	mode = "realtime"
 	if !state.BaselineComplete {
 		mode = "baseline"
 	}
@@ -43,6 +62,8 @@ func (s *Service) Poll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	fetched = len(events)
+	invalid = metadata.InvalidCount
 	for _, event := range events {
 		if err := s.publish(ctx, event, mode, state.BaselineComplete); err != nil {
 			return err
@@ -59,6 +80,7 @@ func (s *Service) Poll(ctx context.Context) error {
 	if err := s.state.Save(ctx, state); err != nil {
 		return err
 	}
+	result = "success"
 	s.log.Info("provider poll published", "provider", s.provider.Name(), "mode", mode,
 		"fetched", len(events), "invalid", metadata.InvalidCount, "not_modified", metadata.NotModified)
 	return nil
@@ -150,10 +172,16 @@ func (s *Service) publish(ctx context.Context, event earthquake.Event, mode stri
 	if err != nil {
 		return err
 	}
-	return s.publisher.Publish(ctx, kafka.Message{
+	if err := s.publisher.Publish(ctx, kafka.Message{
 		Topic:   eventstream.ProviderObservationsTopic,
 		Key:     event.Provider + ":" + event.ExternalID,
 		Value:   payload,
 		Headers: map[string]string{"schema": message.Schema, "message_id": message.MessageID.String()},
-	})
+	}); err != nil {
+		return err
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveProviderPublished(event.Provider, mode)
+	}
+	return nil
 }

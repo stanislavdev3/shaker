@@ -146,8 +146,9 @@ API role when `administration.enabled = true`. It verifies Cloudflare Access at 
 applies database-backed viewer/operator/owner roles. Configure a dedicated
 `administration.host`, the Access team domain and audience, and at least one bootstrap owner.
 Its scope, security model, screens, deployment, and remaining implementation sequence
-are specified in [docs/admin.md](docs/admin.md). Metrics and logs remain exclusively
-in Grafana and Loki.
+are specified in [docs/admin.md](docs/admin.md). Operational metrics remain in Grafana;
+the dashboard and metric ownership model is documented in
+[docs/observability.md](docs/observability.md).
 
 ## Webhook verification
 

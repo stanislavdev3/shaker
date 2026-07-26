@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/example/earthquake-service/internal/clock"
+	"github.com/example/earthquake-service/internal/observability"
 	"github.com/example/earthquake-service/internal/repository/postgres"
 )
 
@@ -33,6 +34,7 @@ type Worker struct {
 	maxResponse                            int64
 	allowPrivate                           bool
 	telegram                               TelegramSender
+	metrics                                *observability.Metrics
 }
 
 type TelegramSender interface {
@@ -40,9 +42,16 @@ type TelegramSender interface {
 	EditAlertMessage(context.Context, int64, int64, string, *float64, *float64, string) error
 }
 
-func NewWorker(repo *postgres.Repository, cipher *Cipher, c clock.Clock, log *slog.Logger, id, userAgent string, batch, maxAttempts int, lockTimeout, poll, httpTimeout time.Duration, maxResponse int64, allowPrivate bool, telegram TelegramSender) *Worker {
-	return &Worker{repo: repo, cipher: cipher, clock: c, log: log, id: id, userAgent: userAgent, batch: batch, maxAttempts: maxAttempts,
+func NewWorker(repo *postgres.Repository, cipher *Cipher, c clock.Clock, log *slog.Logger, id, userAgent string,
+	batch, maxAttempts int, lockTimeout, poll, httpTimeout time.Duration, maxResponse int64, allowPrivate bool,
+	telegram TelegramSender, metrics ...*observability.Metrics,
+) *Worker {
+	worker := &Worker{repo: repo, cipher: cipher, clock: c, log: log, id: id, userAgent: userAgent, batch: batch, maxAttempts: maxAttempts,
 		lockTimeout: lockTimeout, pollInterval: poll, httpTimeout: httpTimeout, maxResponse: maxResponse, allowPrivate: allowPrivate, telegram: telegram}
+	if len(metrics) > 0 {
+		worker.metrics = metrics[0]
+	}
+	return worker
 }
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
@@ -83,6 +92,10 @@ func (w *Worker) processTelegramAlerts(ctx context.Context) {
 }
 
 func (w *Worker) deliverTelegramAlert(ctx context.Context, alert postgres.TelegramAlertMessage) {
+	operation := "edit"
+	if alert.TelegramMessageID == nil {
+		operation = "send"
+	}
 	attempt := alert.AttemptCount + 1
 	now := w.clock.Now()
 	message, err := telegramMessage(alert.DesiredPayload)
@@ -103,6 +116,13 @@ func (w *Worker) deliverTelegramAlert(ctx context.Context, alert postgres.Telegr
 		if saveErr := w.repo.CompleteTelegramAlertMessage(context.WithoutCancel(ctx), alert.ID,
 			alert.DesiredEarthquakeVersion, messageID, attempt, w.clock.Now()); saveErr != nil {
 			w.log.Error("persist Telegram alert result", "telegram_alert_id", alert.ID, "error", saveErr)
+			if w.metrics != nil {
+				w.metrics.ObserveTelegramAlert(operation, "persist_error")
+			}
+			return
+		}
+		if w.metrics != nil {
+			w.metrics.ObserveTelegramAlert(operation, "sent")
 		}
 		return
 	}
@@ -111,11 +131,19 @@ func (w *Worker) deliverTelegramAlert(ctx context.Context, alert postgres.Telegr
 		next = now.Add(retryAfter)
 	}
 	dead := attempt >= w.maxAttempts
+	if w.metrics != nil {
+		result := "retry"
+		if dead {
+			result = "dead"
+		}
+		w.metrics.ObserveTelegramAlert(operation, result)
+	}
 	if saveErr := w.repo.FailTelegramAlertMessage(context.WithoutCancel(ctx), alert.ID, attempt, next, dead, err.Error(), w.clock.Now()); saveErr != nil {
 		w.log.Error("persist Telegram alert failure", "telegram_alert_id", alert.ID, "error", saveErr)
 	}
 }
 func (w *Worker) deliver(ctx context.Context, d postgres.Delivery) {
+	started := w.clock.Now()
 	attempt := d.AttemptCount + 1
 	now := w.clock.Now()
 	statusCode, serverRetryDelay, err := w.send(ctx, d, now)
@@ -139,6 +167,10 @@ func (w *Worker) deliver(ctx context.Context, d postgres.Delivery) {
 	}
 	if saveErr := w.repo.CompleteDelivery(context.WithoutCancel(ctx), d.ID, status, attempt, next, statusCode, errorText, w.clock.Now()); saveErr != nil {
 		w.log.Error("persist notification result", "delivery_id", d.ID, "error", saveErr)
+		status = "persist_error"
+	}
+	if w.metrics != nil {
+		w.metrics.ObserveNotificationDelivery(d.Channel, status, w.clock.Now().Sub(started))
 	}
 }
 
