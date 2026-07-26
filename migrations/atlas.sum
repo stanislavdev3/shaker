@@ -1,4 +1,4 @@
-h1:8XQtp9D5CRDFTytQvVWNpiifmdLMT80IaBByi2z0FWg=
+h1:darSuQp/lwVSPHxL0XDZ88nGIpM4DYpUzlB9NMI6FTE=
 202606290001_initial.sql h1:6UTwjxcPNmRYe1ntPMz/vuuhbS63Vk0Px73vyld+99U=
 202606290002_realtime_notifications.sql h1:0qYAfx2NmbGwbvNAevAu4MhbtLq1XiCJkEYQGnwdRqc=
 202607130001_telegram_notifications.sql h1:WplczNfYZuxrOLQrQoXXiYI3TyIuERqP/Cc9/2jhqI4=
@@ -9,3 +9,4 @@ h1:8XQtp9D5CRDFTytQvVWNpiifmdLMT80IaBByi2z0FWg=
 202607140005_administration.sql h1:BckVDyWINpTVZ3tvu9GBa4pY1oq6MyNI8N4pnSGKMeE=
 202607200001_notification_matching_audit.sql h1:fm7/mQ9oTlmwOoU4D1i0Ykfq3Il9Wd4VHiLY7EFt+mY=
 202607200002_intensity_decision_policy.sql h1:/6hAE4eWXxNGFoIqZYTBCSR5LT6AkK4DEtuMioPZpX0=
+202607260001_core_messaging.sql h1:GNLFnJT2ZM1WK8ozxGwt3LnoTnqbgH28XDfdcGKKP+g=

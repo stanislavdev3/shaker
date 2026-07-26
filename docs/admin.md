@@ -19,7 +19,7 @@ The public root route remains unavailable. When administration is disabled,
 
 ## Architecture and technology
 
-The interface is served only by the `api` role of the existing Go modular monolith:
+The interface is served only by the `api` service:
 
 ```text
 /api/*      Public and mobile JSON APIs
@@ -238,24 +238,25 @@ and action outcomes. No metrics panels are rendered in the admin interface.
 
 ## Configuration and deployment
 
-Expected deployment configuration:
+Expected TOML deployment configuration:
 
-```text
-ADMIN_ENABLED=true
-ADMIN_HOST=eq.screaming.dog
-CLOUDFLARE_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com
-CLOUDFLARE_ACCESS_AUDIENCE=application-audience-tag
-ADMIN_BOOTSTRAP_OWNERS=admin@example.com
-GRAFANA_BASE_URL=https://grafana.example.com
+```toml
+[administration]
+enabled = true
+host = "eq.screaming.dog"
+cloudflare_team_domain = "example.cloudflareaccess.com"
+cloudflare_audience = "application-audience-tag"
+bootstrap_owners = ["admin@example.com"]
+grafana_base_url = "https://grafana.example.com"
 ```
 
-These names are implemented and included in `.env.example`. Multiple bootstrap owners
-are comma-separated. `ADMIN_DEVELOPMENT_EMAIL` is an explicit development-only Access
-bypass; configuration loading rejects it outside `APP_ENV=development`. Secrets are
-supplied through deployment configuration and are never committed.
+These names are implemented and included in `config.example.toml`.
+`administration.development_email` is an explicit development-only Access bypass;
+configuration loading rejects it outside `app.environment = "development"`. Production
+configuration files contain secrets, are mounted read-only, and are never committed.
 
 The existing Docker image contains the embedded admin assets. The worker image and
-binary remain identical, but worker roles do not register admin routes. `make deploy`
+binary remains identical, but non-API roles do not register admin routes. `make deploy`
 continues to build one image, wait for PostgreSQL, apply Atlas migrations, and update
 the API and worker containers. No separate frontend container, Node.js runtime,
 broker, cache, or database is introduced.

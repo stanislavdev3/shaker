@@ -1,3 +1,12 @@
+x-provider-worker: &provider-worker
+  build: .
+  volumes:
+    - ./config.toml:/etc/shaker/config.toml:ro
+    - provider-state:/var/lib/shaker/provider-state
+  depends_on:
+    kafka-init:
+      condition: service_completed_successfully
+
 services:
   postgres:
     image: postgis/postgis:17-3.5
@@ -14,26 +23,99 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  kafka:
+    image: apache/kafka:4.2.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: BROKER://:9092,CONTROLLER://:9093,HOST://:19092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:9092,HOST://localhost:59092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 6
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "127.0.0.1:59092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  kafka-init:
+    image: apache/kafka:4.2.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic provider.observations.v1 --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic incident.changes.v1 --partitions 6 --replication-factor 1
   api:
     build: .
-    command: ["api"]
-    env_file: .env
+    command: ["--config", "/etc/shaker/config.toml", "api"]
+    volumes:
+      - ./config.toml:/etc/shaker/config.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "/earthquake-service", "healthcheck"]
+      test: ["CMD", "/earthquake-service", "--config", "/etc/shaker/config.toml", "healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 5
-  worker:
+  core:
     build: .
-    command: ["worker"]
-    env_file: .env
+    command: ["--config", "/etc/shaker/config.toml", "core"]
+    volumes:
+      - ./config.toml:/etc/shaker/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+  notification:
+    build: .
+    command: ["--config", "/etc/shaker/config.toml", "notification"]
+    volumes:
+      - ./config.toml:/etc/shaker/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+  provider-emsc:
+    <<: *provider-worker
+    command: ["--config", "/etc/shaker/config.toml", "provider-worker", "emsc"]
+  provider-usgs:
+    <<: *provider-worker
+    command: ["--config", "/etc/shaker/config.toml", "provider-worker", "usgs"]
+  provider-geofon:
+    <<: *provider-worker
+    command: ["--config", "/etc/shaker/config.toml", "provider-worker", "geofon"]
+  provider-kndc:
+    <<: *provider-worker
+    command: ["--config", "/etc/shaker/config.toml", "provider-worker", "kndc"]
+  worker:
+    profiles: ["legacy"]
+    build: .
+    command: ["--config", "/etc/shaker/config.toml", "worker"]
+    volumes:
+      - ./config.toml:/etc/shaker/config.toml:ro
     depends_on:
       postgres:
         condition: service_healthy
 volumes:
   postgres-data:
+  kafka-data:
+  provider-state:

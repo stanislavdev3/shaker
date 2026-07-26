@@ -1,0 +1,4 @@
+[
+  {"id":"6395","epochtime":"1784472065","evdate":"2026-07-19","evtime":"20:41:05","evmsec":"78","lat":"41.7485","lon":"75.7299","depth":0,"mb":4.7,"mpv":4.5,"gregion":"KYRGYZSTAN","lddate":"2026-07-20 06:06:58","rms":"0.6","gap":"231","mindist":"1.27","nsta":"0"},
+  {"id":"broken","epochtime":"bad","evmsec":"0","lat":"x","lon":"75","depth":0,"mb":4.0,"mpv":-999,"gregion":"BROKEN","lddate":"2026-07-20 06:06:58"}
+]

@@ -225,8 +225,8 @@ func (p CorrelationPolicy) score(a, b Event) (CorrelationMatch, bool) {
 
 func ProductionCorrelationPolicy() CorrelationPolicy {
 	return CorrelationPolicy{
-		Version: "emsc-usgs-conservative-v1", MaximumTimeDelta: 30 * time.Second,
-		MaximumDistanceKM: 25, MaximumMagnitudeDiff: 0.5, MaximumDepthDiffKM: 30,
+		Version: "multi-catalog-conservative-v2", MaximumTimeDelta: 30 * time.Second,
+		MaximumDistanceKM: 25, MaximumMagnitudeDiff: 0.8, MaximumDepthDiffKM: 30,
 		TimeWeight: 0.45, DistanceWeight: 0.35, MagnitudeWeight: 0.15, DepthWeight: 0.05,
 		AcceptanceThreshold: 0.82, AmbiguityMargin: 0.08,
 	}
@@ -243,7 +243,11 @@ func PreferCanonicalSource(currentProvider string, currentSolution SolutionClass
 
 func providerPriority(provider string) int {
 	switch provider {
+	case "kndc":
+		return 4
 	case "usgs":
+		return 3
+	case "geofon":
 		return 2
 	case "emsc":
 		return 1

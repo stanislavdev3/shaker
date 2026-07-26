@@ -5,20 +5,24 @@ USGS, normalizes and correlates them in PostgreSQL/PostGIS, exposes public JSON 
 GeoJSON APIs, and delivers Telegram and signed webhook notifications. It is an
 earthquake notification service, not a seismic early-warning network.
 
-The deployment is a modular monolith with separate `api` and `worker` process roles. PostgreSQL is the source of truth, revision audit store, persistent provider checkpoint store, and transactional notification queue. No external broker or cache is required.
+The target deployment is a microservice architecture built from one Go repository.
+Provider workers publish versioned observations to Kafka, core correlates and persists
+them in PostgreSQL/PostGIS, notification-service owns delivery processing, and
+api-service serves read traffic. The existing `worker` and `all` roles remain during
+the provider-by-provider cutover. See [docs/microservices.md](docs/microservices.md).
 
 ## Prerequisites and local startup
 
 Install Docker with Compose. For host-based development, install Go 1.26.x, Atlas, PostgreSQL client tools, and golangci-lint.
 
 ```bash
-cp .env.example .env
+cp config.example.toml config.toml
 openssl rand -base64 32
-# Put that value in SECRETS_ENCRYPTION_KEY and replace ADMIN_API_KEY.
+# Put that value in security.encryption_key and replace api.admin_api_key.
 docker compose up --build
 ```
 
-The API is available at `http://localhost:8080`. PostgreSQL is intentionally not published to the host. The initial SQL migration is applied by the Postgres initialization hook on a new Compose volume. For an existing database, set `DATABASE_URL` and run:
+The API is available at `http://localhost:8080`. PostgreSQL is intentionally not published to the host. The initial SQL migration is applied by the Postgres initialization hook on a new Compose volume. Atlas remains the migration tool for an existing database.
 
 ```bash
 make migrate
@@ -58,32 +62,60 @@ baseline option has no effect on normal deployments.
 ## Commands and execution roles
 
 ```bash
-earthquake-service api
-earthquake-service worker
-earthquake-service all
-earthquake-service backfill --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
+earthquake-service --config /etc/shaker/config.toml api
+earthquake-service --config /etc/shaker/config.toml core
+earthquake-service --config /etc/shaker/config.toml provider-worker emsc
+earthquake-service --config /etc/shaker/config.toml provider-worker usgs
+earthquake-service --config /etc/shaker/config.toml provider-worker geofon
+earthquake-service --config /etc/shaker/config.toml provider-worker kndc
+earthquake-service --config /etc/shaker/config.toml notification
+earthquake-service --config /etc/shaker/config.toml worker
+earthquake-service --config /etc/shaker/config.toml all
+earthquake-service --config /etc/shaker/config.toml backfill --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
 ```
 
-`all` is intended for local use. Compose runs `api` and `worker` separately. A backfill is split into configurable 24-hour windows, checkpoints after each window, resumes safely, and never creates notifications.
+The provider name is an explicit subcommand argument; its endpoint, limits, polling
+interval, and state file come from the matching `providers.<name>` TOML table. Deploy
+the same binary separately for `emsc`, `usgs`, `geofon`, and `kndc`. `core` consumes
+provider observations and publishes canonical changes through a transactional outbox.
+`notification` consumes canonical
+changes, and runs Telegram, webhook, and subscription delivery processing. The legacy
+`worker` and `all` roles support reversible migration.
+A backfill is split into configurable 24-hour windows, checkpoints after each window,
+resumes safely, and never creates notifications.
 
 ## Configuration
 
-All configuration is supplied via environment variables. See [.env.example](.env.example) for the complete set. Production requires an HTTPS webhook URL, a strong administrative API key, and a base64-encoded 32-byte AES key. `WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` is rejected outside development.
+Application configuration is read exclusively from a TOML file selected by `--config`
+(default `config.toml`); environment variables are not read and cannot override file values.
+See [config.example.toml](config.example.toml) for every setting. The decoder rejects
+unknown fields, malformed durations, and files larger than 1 MiB. Production requires
+an HTTPS webhook URL, a strong administrative API key, and a base64-encoded 32-byte AES
+key. Keep production files outside the repository with permissions limited to the
+service account. `notification.webhook.allow_private_networks=true` is rejected outside
+development. Production should use a separate least-privilege file per service; see
+[docs/configuration.md](docs/configuration.md).
 
 The worker polls USGS every 60 seconds by default. Its first successful poll against an empty provider state is a baseline and suppresses notifications. Conditional request validators and checkpoints survive restarts.
 
-Set `EMSC_ENABLED=true` on worker roles to enable the EMSC standing-order
+Run `provider-worker emsc` to enable the standing-order
 WebSocket for preliminary low-latency alerts and the EMSC FDSN catalogue for
 confirmation and overlapping recovery. Both channels share the EMSC `unid`, so
 confirmation edits the original Telegram message. See
 [`docs/emsc.md`](docs/emsc.md) for rollout controls and the current
 cross-provider correlation boundary.
 
-Set `TELEGRAM_BOT_TOKEN` to enable the Telegram bot in the worker. Users send `/start`,
+Deploy `provider-worker geofon` and `provider-worker kndc` to add
+the GEOFON global FDSN catalogue and the KNDC Central Asia urgent bulletin. Both
+catalogues use the same audited cross-provider correlation path as USGS and EMSC.
+See [`docs/catalog-providers.md`](docs/catalog-providers.md) for source contracts,
+polling controls, and KNDC's non-versioned endpoint caveat.
+
+Set `notification.telegram.bot_token` to enable the Telegram bot. Users send `/start`,
 share their location, choose RU or EN, and select an expected local MMI threshold from
 II through VI. See [docs/telegram.md](docs/telegram.md).
 
-Set `TELEGRAM_GLOBAL_CHANNEL=@eqmonitor` to publish all normalized earthquake incidents
+Set `notification.telegram.global_channel = "@eqmonitor"` to publish all normalized earthquake incidents
 worldwide to a channel where the bot has post and edit administrator permissions.
 
 ## API examples
@@ -110,9 +142,9 @@ curl -X POST http://localhost:8080/admin/api/notification-subscriptions \
 If the server generates the webhook secret it returns it once. Later reads never return it.
 
 A private, server-rendered administration interface is available on `/admin` for the
-API role when `ADMIN_ENABLED=true`. It verifies Cloudflare Access at the origin, then
+API role when `administration.enabled = true`. It verifies Cloudflare Access at the origin, then
 applies database-backed viewer/operator/owner roles. Configure a dedicated
-`ADMIN_HOST`, the Access team domain and audience, and at least one bootstrap owner.
+`administration.host`, the Access team domain and audience, and at least one bootstrap owner.
 Its scope, security model, screens, deployment, and remaining implementation sequence
 are specified in [docs/admin.md](docs/admin.md). Metrics and logs remain exclusively
 in Grafana and Loki.
@@ -143,8 +175,8 @@ make build
 Integration tests require a migrated, isolated PostGIS database:
 
 ```bash
-export TEST_DATABASE_URL='postgres://earthquake:earthquake@localhost:5432/earthquake_test?sslmode=disable'
-for migration in migrations/*.sql; do psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"; done
+cp test.integration.example.toml test.integration.toml
+# Point database.url and kafka.broker at isolated test services, then apply migrations.
 make test-integration
 ```
 

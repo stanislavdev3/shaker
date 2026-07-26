@@ -2,7 +2,7 @@
 
 ## Runtime flow
 
-EMSC integration is opt-in with `EMSC_ENABLED=true` and uses two official
+EMSC integration is enabled with `providers.emsc.enabled = true` and uses two official
 SeismicPortal interfaces:
 
 - the standing-order WebSocket at
@@ -42,28 +42,30 @@ incident to `retracted`.
 
 ## Configuration
 
-```env
-EMSC_ENABLED=true
-EMSC_WEBSOCKET_URL=wss://www.seismicportal.eu/standing_order/websocket
-EMSC_FDSN_URL=https://www.seismicportal.eu/fdsnws/event/1/query
-EMSC_POLL_INTERVAL=30s
-EMSC_HTTP_TIMEOUT=20s
-EMSC_LOOKBACK_DURATION=2h
-EMSC_PING_INTERVAL=15s
-EMSC_MAX_RESPONSE_BYTES=26214400
-EMSC_MAX_FRAME_BYTES=262144
+```toml
+[providers.emsc]
+enabled = true
+websocket_url = "wss://www.seismicportal.eu/standing_order/websocket"
+fdsn_url = "https://www.seismicportal.eu/fdsnws/event/1/query"
+state_file = "/var/lib/shaker/provider-state/emsc.json"
+poll_interval = "30s"
+http_timeout = "20s"
+lookback = "2h"
+ping_interval = "15s"
+max_response_bytes = 26214400
+max_frame_bytes = 262144
 ```
 
 The feature defaults to disabled so a release can be deployed before activating
-the new external dependency. Enable it only on worker roles; API roles never
+the new external dependency. Enable it only on the EMSC provider-worker; API roles never
 open provider connections.
 
 ## Current correlation boundary
 
 EMSC standing-order and EMSC FDSN observations are merged by their authoritative shared
 `unid`. Previously unseen EMSC and USGS identities are also eligible for automatic
-cross-provider association under the conservative, replay-calibrated
-`emsc-usgs-conservative-v1` policy described in
+cross-provider association under the conservative, versioned
+`multi-catalog-conservative-v2` policy described in
 [`event-correlation.md`](event-correlation.md). Ambiguous and below-threshold candidates
 remain separate incidents, with their ranked decision evidence stored on the
 `new_incident` association. Accepted links store the score, component deltas, complete

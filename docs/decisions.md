@@ -7,6 +7,24 @@ notification, observability, recovery, and operational decisions must be suitabl
 a production system. Temporary shortcuts must be explicitly documented together with
 their removal criteria.
 
+## Services communicate through versioned Kafka events
+
+Provider ingestion, canonical processing, notification delivery, and API serving are
+separate deployment boundaries in one Go repository. Kafka delivery is at least once.
+Core uses a durable inbox for provider observations and a transactional outbox for
+canonical changes; PostgreSQL/Kafka dual writes are prohibited. The legacy direct
+worker path remains only during reversible provider-by-provider cutover. See
+[microservices.md](microservices.md).
+
+## Application configuration is TOML-only
+
+Every application role reads a bounded, strictly decoded TOML file selected with
+`--config`. Environment variables are not an override layer. Provider-worker identity
+is an explicit command argument, while its endpoint, limits, intervals, and durable
+state path come from the matching provider table. Production configuration files are
+mounted read-only, kept outside version control, and scoped per service so provider
+workers do not receive database or notification credentials.
+
 ## EMSC is the low-latency source
 
 The EMSC standing-order WebSocket is the primary source for low-latency earthquake
@@ -27,14 +45,26 @@ history and can be corrected without deleting source data.
 False merges are more harmful than temporary duplicates. Ambiguous candidates are not
 automatically associated. See [event-correlation.md](event-correlation.md).
 
-## PostgreSQL is the notification queue
+## PostgreSQL is the channel delivery queue
 
-Delivery creation must be atomic with earthquake changes. PostgreSQL provides this atomicity, uniqueness constraints, durable storage, `FOR UPDATE SKIP LOCKED`, and abandoned-lock recovery without another operational dependency.
+Core publishes canonical changes through its transactional outbox. Notification-service
+creates delivery jobs atomically with its Kafka inbox record, so replay cannot duplicate
+matching decisions. PostgreSQL provides delivery uniqueness, durable storage,
+`FOR UPDATE SKIP LOCKED`, and abandoned-lock recovery. Kafka connects the core and
+notification transaction boundaries; there is no PostgreSQL/Kafka dual write.
+
+## franz-go is the Kafka client
+
+The Kafka adapter uses `franz-go` because it provides explicit offset management,
+cooperative group handling, synchronous acknowledgement when required, and current
+Kafka protocol support without a C dependency. The adapter keeps the dependency out of
+application and domain packages, so replacing the client does not change event contracts
+or service logic. GitHub popularity alone is not treated as a compatibility guarantee.
 
 ## Administration is embedded and management-only
 
-The private administration interface is server-rendered by the API role of the Go
-modular monolith. It uses embedded HTMX, CSS, and MapLibre assets and introduces no
+The private administration interface is server-rendered by the API service. It uses
+embedded HTMX, CSS, and MapLibre assets and introduces no
 separate frontend service or Node.js runtime. Cloudflare Access protects a dedicated
 hostname, and the origin independently validates the Access application JWT.
 

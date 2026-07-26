@@ -1,0 +1,101 @@
+[app]
+environment = "development"
+version = "dev"
+default_role = "all"
+http_address = ":8080"
+metrics_address = ":9090"
+log_level = "info"
+
+[database]
+url = "postgres://earthquake:earthquake@postgres:5432/earthquake?sslmode=disable"
+max_connections = 20
+min_connections = 2
+
+[kafka]
+brokers = ["kafka:9092"]
+client_id = ""
+core_consumer_group = "shaker-core-v1"
+notification_consumer_group = "shaker-notification-v1"
+max_message_bytes = 4194304
+outbox_batch_size = 100
+outbox_lock_timeout = "5m"
+outbox_poll_interval = "1s"
+
+[ingestion]
+backfill_chunk_duration = "24h"
+recovery_overlap_duration = "1h"
+
+[providers.usgs]
+realtime_url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+fdsn_url = "https://earthquake.usgs.gov/fdsnws/event/1/query"
+state_file = "/var/lib/shaker/provider-state/usgs.json"
+poll_interval = "1m"
+http_timeout = "20s"
+max_response_bytes = 26214400
+
+[providers.emsc]
+enabled = true
+websocket_url = "wss://www.seismicportal.eu/standing_order/websocket"
+fdsn_url = "https://www.seismicportal.eu/fdsnws/event/1/query"
+state_file = "/var/lib/shaker/provider-state/emsc.json"
+poll_interval = "30s"
+http_timeout = "20s"
+lookback = "2h"
+ping_interval = "15s"
+max_response_bytes = 26214400
+max_frame_bytes = 262144
+
+[providers.geofon]
+enabled = true
+fdsn_url = "https://geofon.gfz.de/fdsnws/event/1/query"
+state_file = "/var/lib/shaker/provider-state/geofon.json"
+poll_interval = "1m"
+http_timeout = "20s"
+lookback = "2h"
+max_response_bytes = 26214400
+
+[providers.kndc]
+enabled = true
+bulletin_url = "https://kndc.kz/kndc/pagecontent/alarm-bulletin"
+state_file = "/var/lib/shaker/provider-state/kndc.json"
+poll_interval = "5m"
+http_timeout = "20s"
+max_response_bytes = 4194304
+
+[notification]
+batch_size = 50
+max_attempts = 10
+lock_timeout = "5m"
+poll_interval = "1s"
+
+[notification.webhook]
+allow_private_networks = true
+http_timeout = "15s"
+max_response_bytes = 65536
+
+[notification.telegram]
+bot_token = ""
+api_url = "https://api.telegram.org"
+global_channel = ""
+poll_timeout = "25s"
+max_response_bytes = 1048576
+
+[api]
+admin_api_key = "replace-with-a-strong-development-key"
+max_search_radius_km = 2000
+
+[administration]
+enabled = false
+host = ""
+cloudflare_team_domain = ""
+cloudflare_audience = ""
+bootstrap_owners = []
+development_email = ""
+grafana_base_url = ""
+
+[security]
+# Development-only example. Generate a unique 32-byte base64 key for every deployment.
+encryption_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+[observability]
+otlp_endpoint = ""

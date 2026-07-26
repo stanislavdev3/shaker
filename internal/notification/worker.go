@@ -321,13 +321,34 @@ func telegramMessage(payload []byte) (formattedTelegramMessage, error) {
 		}
 		delivery.Sources[delivery.Earthquake.Source] = *detailsURL
 	}
-	lines = append(lines, telegramSourceLabel("USGS", delivery.Sources["usgs"])+" | "+telegramSourceLabel("EMSC", delivery.Sources["emsc"]))
+	lines = append(lines, telegramSourceLabels(delivery.Sources, delivery.Earthquake.Source))
 	message := formattedTelegramMessage{text: strings.Join(lines, "\n"), locationButton: localized(language, "🗺 Show location", "🗺 Показать место")}
 	if validTelegramCoordinates(delivery.Earthquake.Latitude, delivery.Earthquake.Longitude) {
 		message.latitude = delivery.Earthquake.Latitude
 		message.longitude = delivery.Earthquake.Longitude
 	}
 	return message, nil
+}
+
+func telegramSourceLabels(sources map[string]string, preferred string) string {
+	ordered := []struct{ key, label string }{
+		{"kndc", "KNDC"}, {"usgs", "USGS"}, {"geofon", "GEOFON"}, {"emsc", "EMSC"},
+	}
+	labels := make([]string, 0, len(ordered))
+	for _, source := range ordered {
+		if sourceURL, ok := sources[source.key]; ok {
+			labels = append(labels, telegramSourceLabel(source.label, sourceURL))
+		}
+	}
+	if len(labels) == 0 {
+		for _, source := range ordered {
+			if source.key == preferred {
+				return telegramSourceLabel(source.label, "")
+			}
+		}
+		return html.EscapeString(strings.ToUpper(preferred))
+	}
+	return strings.Join(labels, " | ")
 }
 
 func localized(language, english, russian string) string {

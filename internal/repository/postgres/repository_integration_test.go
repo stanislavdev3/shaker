@@ -3,8 +3,10 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"sync"
@@ -12,24 +14,48 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/example/earthquake-service/internal/administration"
 	"github.com/example/earthquake-service/internal/domain/earthquake"
 	"github.com/example/earthquake-service/internal/domain/notification"
+	"github.com/example/earthquake-service/internal/eventstream"
 )
+
+var integrationConfigPath = flag.String("integration-config", "", "path to integration-test TOML configuration")
 
 func integrationRepository(t *testing.T) *Repository {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
+	if *integrationConfigPath == "" {
+		t.Skip("-integration-config is not set")
 	}
-	repo, err := Open(context.Background(), url, 1, 10)
+	data, err := os.ReadFile(*integrationConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targets struct {
+		Database struct {
+			URL string `toml:"url"`
+		} `toml:"database"`
+		Kafka struct {
+			Broker string `toml:"broker"`
+		} `toml:"kafka"`
+	}
+	decoder := toml.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&targets); err != nil {
+		t.Fatal(err)
+	}
+	if targets.Database.URL == "" {
+		t.Fatal("integration configuration database.url is required")
+	}
+	repo, err := Open(context.Background(), targets.Database.URL, 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(repo.Pool.Close)
-	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE admin_audit_log,admin_role_bindings,notification_matching_audits,
+	_, err = repo.Pool.Exec(context.Background(), `TRUNCATE notification_message_inbox,core_outbox_messages,core_message_inbox,
+		admin_audit_log,admin_role_bindings,notification_matching_audits,
 		notification_intensity_evaluations,telegram_alert_messages,notification_deliveries,notification_subscriptions,
 		provider_observations,earthquake_source_associations,earthquake_revisions,earthquake_source_records,earthquakes,
 		ingestion_runs,provider_state CASCADE`)
@@ -37,6 +63,81 @@ func integrationRepository(t *testing.T) *Repository {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+func TestProviderMessageInboxAndIncidentOutbox(t *testing.T) {
+	r := integrationRepository(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	if _, err := r.CreateSubscription(ctx, notification.Subscription{
+		Name: "Kafka notification boundary", Status: "active", Channel: "webhook",
+		WebhookURL: "https://receiver.example/hook", EncryptedWebhookSecret: []byte("encrypted-test-secret"),
+		NotifyOnNew: true, MaximumEventAge: 2 * time.Hour,
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	event := testEvent("kafka-inbox", now, 4.2)
+	message, err := eventstream.NewProviderObservation(event, "realtime", true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := MessagePosition{Topic: eventstream.ProviderObservationsTopic, Partition: 2, Offset: 42}
+	stats, processed, err := r.ApplyProviderMessage(ctx, position, message, now)
+	if err != nil || !processed || stats.Inserted != 1 {
+		t.Fatalf("stats=%+v processed=%v err=%v", stats, processed, err)
+	}
+	stats, processed, err = r.ApplyProviderMessage(ctx, position, message, now.Add(time.Second))
+	if err != nil || processed || stats != (RunStats{}) {
+		t.Fatalf("duplicate stats=%+v processed=%v err=%v", stats, processed, err)
+	}
+	var inboxCount, outboxCount int
+	if err := r.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM core_message_inbox),
+		(SELECT count(*) FROM core_outbox_messages)`).Scan(&inboxCount, &outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if inboxCount != 1 || outboxCount != 1 {
+		t.Fatalf("inbox=%d outbox=%d", inboxCount, outboxCount)
+	}
+	var deliveryCount int
+	if err := r.Pool.QueryRow(ctx, `SELECT count(*) FROM notification_deliveries`).Scan(&deliveryCount); err != nil {
+		t.Fatal(err)
+	}
+	if deliveryCount != 0 {
+		t.Fatalf("core created %d notification deliveries", deliveryCount)
+	}
+	messages, err := r.ClaimCoreOutbox(ctx, "relay-1", 10, time.Minute, now)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("messages=%+v err=%v", messages, err)
+	}
+	if messages[0].Topic != eventstream.IncidentChangesTopic || messages[0].Key == "" {
+		t.Fatalf("message=%+v", messages[0])
+	}
+	incidentMessage, err := eventstream.UnmarshalIncidentChanged(messages[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incidentPosition := MessagePosition{Topic: eventstream.IncidentChangesTopic, Partition: 4, Offset: 9}
+	processed, err = r.ApplyIncidentMessage(ctx, incidentPosition, incidentMessage, now.Add(time.Second))
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	processed, err = r.ApplyIncidentMessage(ctx, incidentPosition, incidentMessage, now.Add(2*time.Second))
+	if err != nil || processed {
+		t.Fatalf("duplicate processed=%v err=%v", processed, err)
+	}
+	var notificationInboxCount int
+	if err := r.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM notification_message_inbox),
+		(SELECT count(*) FROM notification_deliveries)`).Scan(&notificationInboxCount, &deliveryCount); err != nil {
+		t.Fatal(err)
+	}
+	if notificationInboxCount != 1 || deliveryCount != 1 {
+		t.Fatalf("notification inbox=%d deliveries=%d", notificationInboxCount, deliveryCount)
+	}
+	if err := r.CompleteCoreOutbox(ctx, messages[0].ID, "relay-1", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestAdministrationRolesAndAppendOnlyAudit(t *testing.T) {

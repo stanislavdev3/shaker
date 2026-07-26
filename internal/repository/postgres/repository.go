@@ -111,6 +111,19 @@ func (r *Repository) ApplyBatch(ctx context.Context, events []earthquake.Event, 
 		return RunStats{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	stats, err := applyBatch(ctx, tx, events, mode, baselineComplete, true, false, now)
+	if err != nil {
+		return stats, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func applyBatch(ctx context.Context, tx pgx.Tx, events []earthquake.Event, mode string, baselineComplete,
+	processNotifications, publishChanges bool, now time.Time,
+) (RunStats, error) {
 	stats := RunStats{Fetched: len(events)}
 	for _, event := range events {
 		change, err := applyEvent(ctx, tx, event, now)
@@ -125,19 +138,21 @@ func (r *Repository) ApplyBatch(ctx context.Context, events []earthquake.Event, 
 		case earthquake.Unchanged, earthquake.Stale:
 			stats.Unchanged++
 		}
-		if (change.Kind == earthquake.Inserted || change.Kind == earthquake.Updated) && mode == "realtime" {
+		if processNotifications && (change.Kind == earthquake.Inserted || change.Kind == earthquake.Updated) && mode == "realtime" {
 			if err := createDeliveries(ctx, tx, change, mode, baselineComplete, now); err != nil {
 				return stats, err
 			}
 		}
-		if change.Kind == earthquake.Updated {
+		if processNotifications && change.Kind == earthquake.Updated {
 			if err := refreshTelegramAlertMessages(ctx, tx, change.Current, now); err != nil {
 				return stats, err
 			}
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return stats, err
+		if publishChanges && (change.Kind == earthquake.Inserted || change.Kind == earthquake.Updated) {
+			if err := enqueueIncidentChange(ctx, tx, change, mode, baselineComplete, now); err != nil {
+				return stats, err
+			}
+		}
 	}
 	return stats, nil
 }
@@ -343,12 +358,12 @@ func updateCanonicalFromSource(ctx context.Context, tx pgx.Tx, existing, incomin
 }
 
 func correlationDecision(ctx context.Context, tx pgx.Tx, incoming earthquake.Event) (earthquake.CorrelationDecision, error) {
-	if (incoming.Provider != "emsc" && incoming.Provider != "usgs") || incoming.Magnitude == nil {
+	if !correlatedCatalogProvider(incoming.Provider) || incoming.Magnitude == nil {
 		return earthquake.CorrelationDecision{}, nil
 	}
 	// Serialize creation of previously unseen cross-provider identities. The lock
 	// is held only by the current ingestion transaction and prevents symmetric
-	// EMSC/USGS arrivals from creating two incidents concurrently.
+	// Cross-provider catalogue arrivals from creating two incidents concurrently.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2084096761)`); err != nil {
 		return earthquake.CorrelationDecision{}, err
 	}
@@ -361,7 +376,7 @@ func correlationDecision(ctx context.Context, tx pgx.Tx, incoming earthquake.Eve
 			AND EXISTS (
 				SELECT 1 FROM earthquake_source_associations a
 				JOIN earthquake_source_records s ON s.id=a.source_record_id
-				WHERE a.earthquake_id=e.id AND a.active AND s.provider IN ('emsc','usgs') AND s.provider<>$6
+				WHERE a.earthquake_id=e.id AND a.active AND s.provider IN ('emsc','usgs','geofon','kndc') AND s.provider<>$6
 			)
 			AND NOT EXISTS (
 				SELECT 1 FROM earthquake_source_associations a
@@ -394,6 +409,15 @@ func correlationDecision(ctx context.Context, tx pgx.Tx, incoming earthquake.Eve
 		decision.Ambiguous = true
 	}
 	return decision, nil
+}
+
+func correlatedCatalogProvider(provider string) bool {
+	switch provider {
+	case "emsc", "usgs", "geofon", "kndc":
+		return true
+	default:
+		return false
+	}
 }
 
 func insertCorrelatedSource(ctx context.Context, tx pgx.Tx, incoming earthquake.Event, hash []byte,

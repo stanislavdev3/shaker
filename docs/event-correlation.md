@@ -8,17 +8,19 @@ association history is seeded for existing records, and Telegram alert projectio
 persist a remote `message_id` and desired/delivered incident versions. USGS observations
 are classified as confirmed, reviewed, or retracted from their provider status.
 
-The correlation scorer and automatic EMSC-to-USGS association are enabled through the
-versioned `emsc-usgs-conservative-v1` policy. The policy was replayed against the
-production catalogue before activation. Telegram delivery is connected to the message
+The correlation scorer and automatic cross-catalogue association are enabled through
+the versioned `multi-catalog-conservative-v2` policy. Its original EMSC/USGS boundary
+was replayed against the production catalogue before activation, and KNDC has a fixture
+from an observed Central Asia duplicate. Telegram delivery is connected to the message
 projection: the initial send persists `message_id`, and later canonical versions
 converge through `editMessageText` for private alerts and the configured global channel.
 
 EMSC standing-order WebSocket and FDSN adapters share the authoritative EMSC `unid`, so
 an FDSN observation confirms and updates the preliminary incident produced by the
-WebSocket. A previously unseen EMSC or USGS identity may additionally associate with an
-incident from the other provider when the conservative policy produces one unambiguous
-high-confidence match. See `docs/emsc.md` for runtime details.
+WebSocket. A previously unseen EMSC, USGS, GEOFON, or KNDC identity may additionally
+associate with an incident from another catalogue when the conservative policy produces
+one unambiguous high-confidence match. See `docs/emsc.md` and
+`docs/catalog-providers.md` for runtime details.
 
 ## Data model
 
@@ -27,7 +29,7 @@ shown to users:
 
 1. A provider record is identified by `(provider, external_id)` and retains its raw
    observations and material revisions. Each observation records its channel, such as
-   EMSC standing-order WebSocket, EMSC FDSN, or USGS catalogue data. EMSC WebSocket and
+   EMSC standing-order WebSocket, EMSC FDSN, USGS, GEOFON, or KNDC catalogue data. EMSC WebSocket and
    FDSN payloads carrying the same `unid` therefore update one EMSC provider record.
 2. A canonical incident groups observations believed to describe the same physical
    earthquake. It has its own version, lifecycle, and selected canonical fields.
@@ -47,7 +49,7 @@ Lifecycle is independent of a provider's own status field:
 | Lifecycle | Meaning |
 | --- | --- |
 | `preliminary` | The incident is supported only by a low-latency EMSC WebSocket observation. |
-| `confirmed` | At least one associated EMSC FDSN or USGS catalogue observation supports the incident. |
+| `confirmed` | At least one associated EMSC FDSN, USGS, GEOFON, or KNDC catalogue observation supports the incident. |
 | `reviewed` | An associated provider explicitly marks its solution as reviewed. |
 | `retracted` | Provider evidence or an operator decision invalidates the incident. |
 
@@ -73,7 +75,7 @@ Correlation follows this order:
    workflow.
 
 The active policy searches by provider origin time, not ingestion or notification time.
-It allows 30 seconds, 25 km, a 0.5 magnitude difference, and a 30 km depth difference;
+It allows 30 seconds, 25 km, a 0.8 magnitude difference, and a 30 km depth difference;
 the weighted score must reach 0.82 and exceed the runner-up by at least 0.08. Magnitude
 is required for heuristic association. The gates, weights, acceptance threshold, and
 ambiguity margin are named and versioned. Changes apply prospectively; bulk
@@ -128,7 +130,7 @@ successfully persisted `message_id` converge by editing that message.
 ## Recovery and operational controls
 
 EMSC FDSN recovery starts from a persisted checkpoint with overlap after WebSocket
-disconnects. Both EMSC and USGS ingestion are idempotent. Recovery and backfill update
+disconnects. All catalogue ingestion is idempotent. Recovery and backfill update
 observations and canonical incidents but suppress new-alert bursts; they may still
 repair or confirm a previously delivered preliminary message.
 
@@ -142,10 +144,10 @@ alerting threshold.
 
 1. Introduce provider observations, canonical incidents, audited associations, and
    lifecycle revisions without changing the public API response shape.
-2. Implement and replay-test the correlation policy against paired historical EMSC and
-   USGS fixtures, then activate the conservative versioned policy. Completed for
-   `emsc-usgs-conservative-v1`; continued false-merge and false-split monitoring remains
-   required.
+2. Implement and replay-test the correlation policy against paired historical catalogues,
+   then activate the conservative versioned policy. Completed for
+   `multi-catalog-conservative-v2`; continued false-merge and false-split monitoring
+   remains required as GEOFON and KNDC history accumulates.
 3. Add EMSC FDSN ingestion and recovery, then the bounded reconnecting WebSocket client.
 4. Add Telegram alert projections, capture `message_id` from `sendMessage`, and support
    `editMessageText` with coalescing and retry.

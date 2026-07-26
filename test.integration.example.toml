@@ -1,0 +1,5 @@
+[database]
+url = "postgres://earthquake:earthquake@127.0.0.1:55433/earthquake?sslmode=disable"
+
+[kafka]
+broker = "127.0.0.1:59092"

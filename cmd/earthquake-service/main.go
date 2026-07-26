@@ -21,32 +21,38 @@ import (
 	"github.com/example/earthquake-service/internal/administration"
 	"github.com/example/earthquake-service/internal/clock"
 	"github.com/example/earthquake-service/internal/config"
+	coreservice "github.com/example/earthquake-service/internal/core"
+	"github.com/example/earthquake-service/internal/eventstream"
 	"github.com/example/earthquake-service/internal/httpadmin"
 	"github.com/example/earthquake-service/internal/httpapi"
 	"github.com/example/earthquake-service/internal/ingestion"
+	"github.com/example/earthquake-service/internal/kafka"
 	"github.com/example/earthquake-service/internal/notification"
 	"github.com/example/earthquake-service/internal/observability"
+	"github.com/example/earthquake-service/internal/provider"
 	"github.com/example/earthquake-service/internal/provider/emsc"
+	"github.com/example/earthquake-service/internal/provider/geofon"
+	"github.com/example/earthquake-service/internal/provider/kndc"
 	"github.com/example/earthquake-service/internal/provider/usgs"
+	"github.com/example/earthquake-service/internal/providerworker"
 	"github.com/example/earthquake-service/internal/realtime"
 	"github.com/example/earthquake-service/internal/repository/postgres"
 	"github.com/example/earthquake-service/internal/telegram"
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		if err := healthcheck(); err != nil {
+	command, err := parseCommand(os.Args[1:])
+	if err != nil {
+		fatal("parse command", err)
+	}
+	if command.role == "healthcheck" {
+		if err := healthcheck(command.configPath); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
 	}
-
-	role := ""
-	if len(os.Args) > 1 {
-		role = os.Args[1]
-	}
-	cfg, err := config.Load(role)
+	cfg, err := config.Load(command.configPath, command.role, command.provider)
 	if err != nil {
 		fatal("load configuration", err)
 	}
@@ -54,18 +60,55 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	userAgent := "earthquake-service/" + cfg.Version
+
+	if cfg.Role == "provider-worker" {
+		err = runProviderWorker(ctx, cfg, userAgent, log)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fatal("provider worker stopped", err)
+		}
+		return
+	}
 
 	repo, err := postgres.Open(ctx, cfg.DatabaseURL, cfg.DatabaseMinConnections, cfg.DatabaseMaxConnections)
 	if err != nil {
 		fatal("connect to database", err)
 	}
 	defer repo.Pool.Close()
-
-	cipher, err := notification.NewCipher(cfg.EncryptionKey)
-	if err != nil {
-		fatal("initialize secrets cipher", err)
+	if cfg.Role == "core" {
+		err = runCore(ctx, cfg, repo, log)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fatal("core service stopped", err)
+		}
+		return
 	}
-	userAgent := "earthquake-service/" + cfg.Version
+
+	var cipher *notification.Cipher
+	if len(cfg.EncryptionKey) > 0 {
+		cipher, err = notification.NewCipher(cfg.EncryptionKey)
+		if err != nil {
+			fatal("initialize secrets cipher", err)
+		}
+	}
+	var telegramClient *telegram.Client
+	if (cfg.Role == "worker" || cfg.Role == "all" || cfg.Role == "notification") && cfg.TelegramBotToken != "" {
+		telegramClient = telegram.NewClient(cfg.TelegramAPIURL, cfg.TelegramBotToken, cfg.TelegramPollTimeout, cfg.TelegramMaxResponseBytes)
+		if cfg.TelegramGlobalChannel != "" {
+			subscription, registerErr := telegram.RegisterGlobalChannel(ctx, repo, telegramClient, cfg.TelegramGlobalChannel, clock.Real{}.Now())
+			if registerErr != nil {
+				fatal("register Telegram global channel", registerErr)
+			}
+			log.Info("Telegram global channel enabled", "channel", cfg.TelegramGlobalChannel, "subscription_id", subscription.ID)
+		}
+	}
+	if cfg.Role == "notification" {
+		err = runNotification(ctx, cfg, repo, cipher, userAgent, telegramClient, log)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fatal("notification service stopped", err)
+		}
+		return
+	}
+
 	usgsProvider := usgs.New(cfg.USGSRealtimeURL, cfg.USGSFDSNURL, userAgent, cfg.USGSHTTPTimeout, cfg.USGSMaxResponseBytes)
 	usgsIngestion := ingestion.New(usgsProvider, repo, clock.Real{}, log)
 	var emscIngestion *ingestion.Service
@@ -76,34 +119,179 @@ func main() {
 		emscIngestion = ingestion.New(emscProvider, repo, clock.Real{}, log)
 		emscStream = emsc.NewStream(cfg.EMSCWebSocketURL, userAgent, cfg.EMSCHTTPTimeout, cfg.EMSCPingInterval, cfg.EMSCMaxFrameBytes, log, emscMetrics)
 	}
-	var telegramClient *telegram.Client
-	if (cfg.Role == "worker" || cfg.Role == "all") && cfg.TelegramBotToken != "" {
-		telegramClient = telegram.NewClient(cfg.TelegramAPIURL, cfg.TelegramBotToken, cfg.TelegramPollTimeout, cfg.TelegramMaxResponseBytes)
-		if cfg.TelegramGlobalChannel != "" {
-			subscription, registerErr := telegram.RegisterGlobalChannel(ctx, repo, telegramClient, cfg.TelegramGlobalChannel, clock.Real{}.Now())
-			if registerErr != nil {
-				fatal("register Telegram global channel", registerErr)
-			}
-			log.Info("Telegram global channel enabled", "channel", cfg.TelegramGlobalChannel, "subscription_id", subscription.ID)
-		}
+	var geofonIngestion *ingestion.Service
+	if cfg.GEOFONEnabled && (cfg.Role == "worker" || cfg.Role == "all") {
+		geofonProvider := geofon.New(cfg.GEOFONFDSNURL, userAgent, clock.Real{}, cfg.GEOFONHTTPTimeout, cfg.GEOFONLookback, cfg.GEOFONMaxResponseBytes)
+		geofonIngestion = ingestion.New(geofonProvider, repo, clock.Real{}, log)
 	}
-
+	var kndcIngestion *ingestion.Service
+	if cfg.KNDCEnabled && (cfg.Role == "worker" || cfg.Role == "all") {
+		kndcProvider := kndc.New(cfg.KNDCBulletinURL, userAgent, cfg.KNDCHTTPTimeout, cfg.KNDCMaxResponseBytes)
+		kndcIngestion = ingestion.New(kndcProvider, repo, clock.Real{}, log)
+	}
 	switch cfg.Role {
 	case "api":
 		err = runAPI(ctx, cfg, repo, cipher, log)
 	case "worker":
-		runWorker(ctx, cfg, usgsIngestion, emscIngestion, emscStream, repo, cipher, userAgent, telegramClient, log)
+		runWorker(ctx, cfg, usgsIngestion, emscIngestion, geofonIngestion, kndcIngestion, emscStream, repo, cipher, userAgent, telegramClient, log)
 	case "all":
-		go runWorker(ctx, cfg, usgsIngestion, emscIngestion, emscStream, repo, cipher, userAgent, telegramClient, log)
+		go runWorker(ctx, cfg, usgsIngestion, emscIngestion, geofonIngestion, kndcIngestion, emscStream, repo, cipher, userAgent, telegramClient, log)
 		err = runAPI(ctx, cfg, repo, cipher, log)
 	case "backfill":
-		err = runBackfill(ctx, cfg, usgsIngestion, os.Args[2:])
+		err = runBackfill(ctx, cfg, usgsIngestion, command.args)
 	default:
 		err = fmt.Errorf("unsupported role %q", cfg.Role)
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fatal("service stopped", err)
 	}
+}
+
+type commandOptions struct {
+	configPath string
+	role       string
+	provider   string
+	args       []string
+}
+
+func parseCommand(args []string) (commandOptions, error) {
+	flags := flag.NewFlagSet("earthquake-service", flag.ContinueOnError)
+	configPath := flags.String("config", "config.toml", "path to the TOML configuration file")
+	if err := flags.Parse(args); err != nil {
+		return commandOptions{}, err
+	}
+	remaining := flags.Args()
+	command := commandOptions{configPath: *configPath}
+	if len(remaining) == 0 {
+		return command, nil
+	}
+	command.role = remaining[0]
+	command.args = remaining[1:]
+	if command.role == "provider-worker" {
+		if len(command.args) == 0 {
+			return commandOptions{}, errors.New("provider-worker requires a provider argument")
+		}
+		command.provider = command.args[0]
+		command.args = command.args[1:]
+	}
+	if command.role != "backfill" && len(command.args) != 0 {
+		return commandOptions{}, fmt.Errorf("unexpected arguments for %s: %s", command.role, strings.Join(command.args, " "))
+	}
+	return command, nil
+}
+
+func runProviderWorker(ctx context.Context, cfg config.Config, userAgent string, log *slog.Logger) error {
+	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
+		return fmt.Errorf("start provider metrics server: %w", err)
+	}
+	publisher, err := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaClientID, int32(cfg.KafkaMaxMessageBytes))
+	if err != nil {
+		return fmt.Errorf("initialize Kafka producer: %w", err)
+	}
+	defer publisher.Close()
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := publisher.Ping(pingCtx); err != nil {
+		return fmt.Errorf("connect to Kafka: %w", err)
+	}
+	state, err := providerworker.NewFileStateStore(cfg.ProviderStateFile)
+	if err != nil {
+		return err
+	}
+	var source provider.Provider
+	var interval time.Duration
+	var stream *emsc.Stream
+	switch cfg.ProviderName {
+	case "emsc":
+		source = emsc.NewFDSN(cfg.EMSCFDSNURL, userAgent, clock.Real{}, cfg.EMSCHTTPTimeout,
+			cfg.EMSCLookback, cfg.EMSCMaxResponseBytes)
+		interval = cfg.EMSCPollInterval
+		stream = emsc.NewStream(cfg.EMSCWebSocketURL, userAgent, cfg.EMSCHTTPTimeout, cfg.EMSCPingInterval,
+			cfg.EMSCMaxFrameBytes, log, observability.NewEMSCWebSocketMetrics(prometheus.DefaultRegisterer))
+	case "usgs":
+		source = usgs.New(cfg.USGSRealtimeURL, cfg.USGSFDSNURL, userAgent, cfg.USGSHTTPTimeout, cfg.USGSMaxResponseBytes)
+		interval = cfg.USGSPollInterval
+	case "geofon":
+		source = geofon.New(cfg.GEOFONFDSNURL, userAgent, clock.Real{}, cfg.GEOFONHTTPTimeout,
+			cfg.GEOFONLookback, cfg.GEOFONMaxResponseBytes)
+		interval = cfg.GEOFONPollInterval
+	case "kndc":
+		source = kndc.New(cfg.KNDCBulletinURL, userAgent, cfg.KNDCHTTPTimeout, cfg.KNDCMaxResponseBytes)
+		interval = cfg.KNDCPollInterval
+	default:
+		return fmt.Errorf("unsupported provider %q", cfg.ProviderName)
+	}
+	service := providerworker.New(source, publisher, state, clock.Real{}, log)
+	if err := service.Recover(ctx, cfg.RecoveryOverlapDuration, cfg.BackfillChunkDuration); err != nil {
+		return fmt.Errorf("recover provider observations: %w", err)
+	}
+	if stream != nil {
+		go stream.Run(ctx, service.PublishRealtime)
+	}
+	log.Info("provider worker started", "provider", cfg.ProviderName, "poll_interval", interval)
+	return service.Run(ctx, interval)
+}
+
+func runCore(ctx context.Context, cfg config.Config, repo *postgres.Repository, log *slog.Logger) error {
+	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
+		return fmt.Errorf("start core metrics server: %w", err)
+	}
+	publisher, err := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaClientID+"-outbox", int32(cfg.KafkaMaxMessageBytes))
+	if err != nil {
+		return fmt.Errorf("initialize core Kafka producer: %w", err)
+	}
+	defer publisher.Close()
+	consumer, err := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaClientID+"-consumer",
+		cfg.KafkaCoreConsumerGroup, eventstream.ProviderObservationsTopic, int32(cfg.KafkaMaxMessageBytes))
+	if err != nil {
+		return fmt.Errorf("initialize core Kafka consumer: %w", err)
+	}
+	processor := coreservice.NewObservationConsumer(consumer, repo, clock.Real{}, log)
+	defer processor.Close()
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := publisher.Ping(pingCtx); err != nil {
+		return fmt.Errorf("connect core producer to Kafka: %w", err)
+	}
+	if err := consumer.Ping(pingCtx); err != nil {
+		return fmt.Errorf("connect core consumer to Kafka: %w", err)
+	}
+	relay := coreservice.NewOutboxRelay(repo, publisher, clock.Real{}, log, "core-outbox-"+uuid.NewString(),
+		cfg.CoreOutboxBatchSize, cfg.CoreOutboxLockTimeout, cfg.CoreOutboxPollInterval)
+	go relay.Run(ctx)
+	log.Info("core service started", "consumer_group", cfg.KafkaCoreConsumerGroup)
+	return processor.Run(ctx)
+}
+
+func runNotification(ctx context.Context, cfg config.Config, repo *postgres.Repository, cipher *notification.Cipher,
+	userAgent string, telegramClient *telegram.Client, log *slog.Logger,
+) error {
+	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
+		return fmt.Errorf("start notification metrics server: %w", err)
+	}
+	consumer, err := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaClientID+"-consumer",
+		cfg.KafkaNotificationConsumerGroup, eventstream.IncidentChangesTopic, int32(cfg.KafkaMaxMessageBytes))
+	if err != nil {
+		return fmt.Errorf("initialize notification Kafka consumer: %w", err)
+	}
+	processor := notification.NewIncidentConsumer(consumer, repo, clock.Real{}, log)
+	defer processor.Close()
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := consumer.Ping(pingCtx); err != nil {
+		return fmt.Errorf("connect notification consumer to Kafka: %w", err)
+	}
+	if telegramClient != nil {
+		go telegram.NewBot(repo, telegramClient, clock.Real{}, log).Run(ctx)
+		log.Info("Telegram bot polling enabled")
+	}
+	worker := notification.NewWorker(repo, cipher, clock.Real{}, log, "notification-"+uuid.NewString(), userAgent,
+		cfg.NotificationBatchSize, cfg.NotificationMaxAttempts, cfg.NotificationLockTimeout,
+		cfg.NotificationPollInterval, cfg.WebhookHTTPTimeout, cfg.WebhookMaxResponseBytes,
+		cfg.WebhookAllowPrivate, telegramClient)
+	go worker.Run(ctx)
+	log.Info("notification service started", "consumer_group", cfg.KafkaNotificationConsumerGroup)
+	return processor.Run(ctx)
 }
 
 func runAPI(ctx context.Context, cfg config.Config, repo *postgres.Repository, cipher *notification.Cipher, log *slog.Logger) error {
@@ -169,7 +357,7 @@ func runAPI(ctx context.Context, cfg config.Config, repo *postgres.Repository, c
 	}
 }
 
-func runWorker(ctx context.Context, cfg config.Config, usgsIngestion, emscIngestion *ingestion.Service, emscStream *emsc.Stream,
+func runWorker(ctx context.Context, cfg config.Config, usgsIngestion, emscIngestion, geofonIngestion, kndcIngestion *ingestion.Service, emscStream *emsc.Stream,
 	repo *postgres.Repository, cipher *notification.Cipher, userAgent string, telegramClient *telegram.Client, log *slog.Logger,
 ) {
 	if err := startWorkerMetrics(ctx, cfg.MetricsAddress, log); err != nil {
@@ -194,6 +382,10 @@ func runWorker(ctx context.Context, cfg config.Config, usgsIngestion, emscIngest
 		go emscStream.Run(ctx, emscIngestion.ApplyRealtime)
 		log.Info("EMSC FDSN and WebSocket ingestion enabled")
 	}
+	startCatalogIngestion(ctx, geofonIngestion, cfg.GEOFONPollInterval, cfg.RecoveryOverlapDuration,
+		cfg.BackfillChunkDuration, "GEOFON", log)
+	startCatalogIngestion(ctx, kndcIngestion, cfg.KNDCPollInterval, cfg.RecoveryOverlapDuration,
+		cfg.BackfillChunkDuration, "KNDC", log)
 
 	workerID := "earthquake-service-" + uuid.NewString()
 	if telegramClient != nil {
@@ -218,6 +410,23 @@ func runWorker(ctx context.Context, cfg config.Config, usgsIngestion, emscIngest
 	)
 	go deliveryWorker.Run(ctx)
 	usgsIngestion.Run(ctx, cfg.USGSPollInterval)
+}
+
+func startCatalogIngestion(ctx context.Context, service *ingestion.Service, pollInterval, recoveryOverlap,
+	backfillChunk time.Duration, providerName string, log *slog.Logger,
+) {
+	if service == nil {
+		return
+	}
+	if from, to, err := service.RecoveryRange(ctx, recoveryOverlap); err != nil {
+		log.Error("calculate provider recovery range", "provider", providerName, "error", err)
+	} else if from != nil && to != nil {
+		if err := service.RunBackfill(ctx, *from, *to, backfillChunk, "recovery"); err != nil {
+			log.Error("provider recovery backfill failed", "provider", providerName, "from", from, "to", to, "error", err)
+		}
+	}
+	go service.Run(ctx, pollInterval)
+	log.Info("catalog ingestion enabled", "provider", providerName, "poll_interval", pollInterval)
 }
 
 func startWorkerMetrics(ctx context.Context, address string, log *slog.Logger) error {
@@ -265,14 +474,14 @@ func runBackfill(ctx context.Context, cfg config.Config, service *ingestion.Serv
 	return service.RunBackfill(ctx, from, to, cfg.BackfillChunkDuration, "backfill")
 }
 
-func healthcheck() error {
-	address := os.Getenv("HTTP_ADDRESS")
-	if address == "" {
-		address = ":8080"
+func healthcheck(configPath string) error {
+	address, err := config.HTTPAddress(configPath)
+	if err != nil {
+		return err
 	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return fmt.Errorf("invalid HTTP_ADDRESS: %w", err)
+		return fmt.Errorf("invalid app.http_address: %w", err)
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"

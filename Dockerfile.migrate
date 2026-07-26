@@ -1,0 +1,5 @@
+# syntax=docker/dockerfile:1.7
+FROM arigaio/atlas:1.2.3@sha256:5eb18a4ee8f34d50b971c2050881106fa663f03ade4b1338edaf45e562172436
+WORKDIR /workspace
+COPY atlas.hcl /workspace/atlas.hcl
+COPY migrations /workspace/migrations

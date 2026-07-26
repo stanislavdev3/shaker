@@ -78,6 +78,25 @@ func TestProductionCorrelationPolicyMatchesObservedEMSCUSGSDuplicate(t *testing.
 	}
 }
 
+func TestProductionCorrelationPolicyMatchesObservedKNDCUSGSDuplicate(t *testing.T) {
+	policy := ProductionCorrelationPolicy()
+	usgsMagnitude, kndcMagnitude := 4.1, 4.7
+	usgsDepth, kndcDepth := 10.0, 0.0
+	usgs := Event{Provider: "usgs", OccurredAt: time.Date(2026, 7, 19, 20, 41, 6, 0, time.UTC),
+		Latitude: 41.75, Longitude: 75.73, Magnitude: &usgsMagnitude, DepthKM: &usgsDepth}
+	kndc := Event{Provider: "kndc", OccurredAt: time.Date(2026, 7, 19, 20, 41, 5, 780000000, time.UTC),
+		Latitude: 41.7485, Longitude: 75.7299, Magnitude: &kndcMagnitude, DepthKM: &kndcDepth}
+	incidentID := uuid.New()
+
+	decision := policy.Correlate(kndc, []CorrelationCandidate{{IncidentID: incidentID, Event: usgs}})
+	if decision.Match == nil || decision.Match.IncidentID != incidentID || decision.Ambiguous {
+		t.Fatalf("expected KNDC observation to correlate, decision=%+v", decision)
+	}
+	if !PreferCanonicalSource("usgs", ConfirmedSolution, "kndc", ConfirmedSolution) {
+		t.Fatal("KNDC should win the equal-class regional catalogue tie-break")
+	}
+}
+
 func TestProductionCorrelationPolicyRejectsPlausibleNearbyAftershock(t *testing.T) {
 	policy := ProductionCorrelationPolicy()
 	now := time.Now().UTC()

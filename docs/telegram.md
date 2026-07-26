@@ -26,12 +26,13 @@ filter.
 
 ## Runtime
 
-Set `TELEGRAM_BOT_TOKEN` to enable both inbound bot polling and Telegram delivery in
-the `worker` role. Obtain the token from BotFather and keep it out of logs and source
-control. `TELEGRAM_API_URL` exists for tests and compatible gateways; production should
-normally use the default `https://api.telegram.org`.
+Set `notification.telegram.bot_token` in the TOML configuration to enable both inbound
+bot polling and Telegram delivery. Obtain the token from BotFather and keep the
+production configuration file out of logs and source control. The `api_url` setting
+exists for tests and compatible gateways; production should normally use the default
+`https://api.telegram.org`.
 
-Set `TELEGRAM_GLOBAL_CHANNEL` to a public channel username such as `@eqmonitor` to
+Set `notification.telegram.global_channel = "@eqmonitor"` to
 publish a worldwide feed. On startup the worker resolves the username to a stable
 numeric chat ID, verifies that the bot is a channel administrator with post and edit
 permissions, and idempotently creates an unfiltered system subscription. A configured

@@ -7,6 +7,7 @@ DEPLOY_ENV := $(SERVER_DIR)/.env
 IMAGE ?= shaker:latest
 ATLAS_IMAGE ?= arigaio/atlas:1.2.3
 DEPLOY_MIGRATION_BASELINE ?= 202607130001
+INTEGRATION_CONFIG ?= test.integration.toml
 export GOCACHE
 
 .PHONY: build image test test-unit test-integration lint fmt generate migrate migrate-down compose-up compose-down backfill openapi-check deploy
@@ -19,7 +20,8 @@ test:
 test-unit:
 	$(GO) test $$(go list ./... | grep -v /integration)
 test-integration:
-	$(GO) test -tags=integration ./internal/repository/postgres
+	$(GO) test -tags=integration ./internal/repository/postgres -args -integration-config "$(abspath $(INTEGRATION_CONFIG))"
+	$(GO) test -tags=integration ./internal/kafka -args -integration-config "$(abspath $(INTEGRATION_CONFIG))"
 lint:
 	golangci-lint run ./...
 fmt:

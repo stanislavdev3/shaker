@@ -1,7 +1,8 @@
 .git
 .gitignore
 .idea
-.env
+config.toml
+test.integration.toml
 /earthquake-service
 coverage.out
 runtime

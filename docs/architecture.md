@@ -4,12 +4,14 @@
 
 ```mermaid
 flowchart LR
-    EMSCWS[EMSC standing-order WebSocket] --> Providers[Provider adapters]
+    EMSCWS[EMSC standing-order WebSocket] --> Providers[Provider workers]
     EMSCFDSN[EMSC FDSN API] --> Providers
     USGS[USGS realtime and FDSN APIs] --> Providers
-    Providers --> Ingestion[Ingestion application service]
-    Ingestion --> Correlation[Incident correlation]
+    Providers --> KafkaIn[Kafka provider.observations.v1]
+    KafkaIn --> Correlation[Core incident correlation]
     Correlation --> DB[(PostgreSQL and PostGIS)]
+    DB --> Outbox[Core transactional outbox]
+    Outbox --> KafkaOut[Kafka incident.changes.v1]
     Client[Mobile and public API clients] --> API[HTTP API]
     Admin[Administrator] --> Access[Cloudflare Access]
     Access --> AdminUI[Private admin HTTP adapter]
@@ -17,12 +19,16 @@ flowchart LR
     AdminUI --> Application
     Application --> DB
     DB -- LISTEN / NOTIFY --> API
-    DB --> Worker[Notification worker]
+    KafkaOut --> Worker[Notification service]
     Worker --> Webhook[Subscriber webhook]
     Worker --> Telegram[Telegram Bot API]
 ```
 
-The executable is one modular monolith with `api`, `worker`, `all`, and `backfill` commands. Domain packages contain normalized models and trigger rules. Provider, HTTP, and PostgreSQL packages are adapters and dependencies point inward.
+One repository and image provide separate `provider-worker`, `core`, `notification`,
+and `api` runtime roles. The legacy `worker`, `all`, and direct `backfill` roles remain
+only for staged migration. Domain packages contain normalized models and trigger
+rules; Kafka, provider, HTTP, and PostgreSQL packages are adapters and dependencies
+point inward. See [microservices.md](microservices.md).
 
 The service exposes JSON, GeoJSON, and WebSocket APIs for mobile and other API clients;
 it does not serve a public web frontend. A private server-rendered administration
@@ -58,11 +64,15 @@ The first successful realtime poll is a baseline. Its transaction completes befo
 
 ```mermaid
 sequenceDiagram
-    participant I as Ingestion
+    participant C as Core
+    participant K as Kafka
     participant P as PostgreSQL
     participant W as Worker
     participant H as Webhook
-    I->>P: Update earthquake and insert delivery in one transaction
+	C->>P: Update earthquake and append canonical outbox event
+	P-->>K: Outbox relay publishes incident change
+	K->>W: Consume incident change
+	W->>P: Inbox deduplication and delivery creation in one transaction
     W->>P: Claim batch with FOR UPDATE SKIP LOCKED
     P-->>W: Jobs marked processing
     W->>H: Signed POST outside transaction
