@@ -244,7 +244,7 @@ func runCore(ctx context.Context, cfg config.Config, repo *postgres.Repository, 
 	}
 	defer publisher.Close()
 	consumer, err := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaClientID+"-consumer",
-		cfg.KafkaCoreConsumerGroup, eventstream.ProviderObservationsTopic, int32(cfg.KafkaMaxMessageBytes))
+		cfg.KafkaCoreConsumerGroup, eventstream.ProviderObservationsTopic, int32(cfg.KafkaMaxMessageBytes), log)
 	if err != nil {
 		return fmt.Errorf("initialize core Kafka consumer: %w", err)
 	}
@@ -273,7 +273,7 @@ func runNotification(ctx context.Context, cfg config.Config, repo *postgres.Repo
 	}
 	metrics := observability.NewMetrics(prometheus.DefaultRegisterer)
 	consumer, err := kafka.NewConsumer(cfg.KafkaBrokers, cfg.KafkaClientID+"-consumer",
-		cfg.KafkaNotificationConsumerGroup, eventstream.IncidentChangesTopic, int32(cfg.KafkaMaxMessageBytes))
+		cfg.KafkaNotificationConsumerGroup, eventstream.IncidentChangesTopic, int32(cfg.KafkaMaxMessageBytes), log)
 	if err != nil {
 		return fmt.Errorf("initialize notification Kafka consumer: %w", err)
 	}

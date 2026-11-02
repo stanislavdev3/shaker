@@ -5,8 +5,11 @@ package kafka
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -53,7 +56,8 @@ func TestProduceConsumeAndCommit(t *testing.T) {
 	}
 	defer producer.Close()
 	consumer, err := NewConsumer([]string{broker}, "shaker-kafka-test-consumer-"+id,
-		"shaker-kafka-test-"+id, eventstream.ProviderObservationsTopic, 1<<20)
+		"shaker-kafka-test-"+id, eventstream.ProviderObservationsTopic, 1<<20,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,5 +92,23 @@ func TestProduceConsumeAndCommit(t *testing.T) {
 	}
 	if err := consumer.Commit(ctx, record); err != nil {
 		t.Fatal(err)
+	}
+	consumer.AllowRebalance()
+
+	// A poll that fails must not leave rebalances blocked, or Close hangs in LeaveGroup.
+	canceled, cancelPoll := context.WithCancel(ctx)
+	cancelPoll()
+	if _, err := consumer.Next(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Next with a canceled context: %v", err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		consumer.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-ctx.Done():
+		t.Fatal("Close blocked after a failed poll")
 	}
 }
